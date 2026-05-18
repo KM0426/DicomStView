@@ -323,11 +323,305 @@ public partial class StudyViewerWindow : Window
         // 今後ここにクリック時の処理を追加可能
         contextMenu.Items.Add(analyzeItem);
 
+        var circleEvalItem = new MenuItem
+        {
+            Header = "円評価"
+        };
+        circleEvalItem.Click += CircleEvalItem_Click;
+        circleEvalItem.Tag = contour;
+        contextMenu.Items.Add(circleEvalItem);
+
+        var sphereEvalItem = new MenuItem
+        {
+            Header = "球評価"
+        };
+        sphereEvalItem.Click += SphereEvalItem_Click;
+        sphereEvalItem.Tag = contour;
+        contextMenu.Items.Add(sphereEvalItem);
+
         // ContextMenuを表示
         polyline.ContextMenu = contextMenu;
         contextMenu.IsOpen = true;
 
         e.Handled = true;
+    }
+
+    private void CircleEvalItem_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not MenuItem menuItem || menuItem.Tag is not ContourPolyline selectedContour)
+        {
+            return;
+        }
+
+        var targetContours = GetContoursByRtStructKey(selectedContour.RtStructKey);
+        if (targetContours.Count == 0)
+        {
+            MessageBox.Show("評価対象の輪郭が見つかりません。", "円評価", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+
+        var perSlice = BuildPerSliceCircleMetrics(targetContours);
+        if (perSlice.Count == 0)
+        {
+            MessageBox.Show("評価に必要な輪郭データが不足しています。", "円評価", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+
+        var circularities = perSlice.Select(x => x.Circularity).ToList();
+        var aspectRatios = perSlice.Select(x => x.AspectRatio).ToList();
+        var roundnesses = perSlice.Select(x => x.Roundness).ToList();
+
+        var textLines = new List<string>
+        {
+            $"ROI: {selectedContour.RtStructKey}",
+            "",
+            "| 評価 | 円形度 | アスペクト比 | 真円度 |",
+            "|---|---:|---:|---:|",
+            $"| 平均値 | {Average(circularities):F3} | {Average(aspectRatios):F3} | {Average(roundnesses):F3} |",
+            $"| 中央値 | {Median(circularities):F3} | {Median(aspectRatios):F3} | {Median(roundnesses):F3} |",
+            "| z | - | - | - |"
+        };
+
+        foreach (var item in perSlice.OrderByDescending(x => x.Z))
+        {
+            textLines.Add($"| {item.Z:F1} | {item.Circularity:F3} | {item.AspectRatio:F3} | {item.Roundness:F3} |");
+        }
+
+        MessageBox.Show(string.Join(Environment.NewLine, textLines), "円評価", MessageBoxButton.OK, MessageBoxImage.Information);
+    }
+
+    private void SphereEvalItem_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not MenuItem menuItem || menuItem.Tag is not ContourPolyline selectedContour)
+        {
+            return;
+        }
+
+        var targetContours = GetContoursByRtStructKey(selectedContour.RtStructKey);
+        if (targetContours.Count < 2)
+        {
+            MessageBox.Show("球評価には2スライス以上の輪郭が必要です。", "球評価", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+
+        var sliceProfiles = BuildPerSliceProfiles(targetContours)
+            .OrderBy(x => x.Z)
+            .ToList();
+
+        if (sliceProfiles.Count < 2)
+        {
+            MessageBox.Show("球評価に必要なスライスデータが不足しています。", "球評価", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+
+        var volume = 0.0;
+        var sideSurface = 0.0;
+
+        for (var i = 0; i + 1 < sliceProfiles.Count; i++)
+        {
+            var current = sliceProfiles[i];
+            var next = sliceProfiles[i + 1];
+            var dz = Math.Abs(next.Z - current.Z);
+
+            if (dz <= 0)
+            {
+                continue;
+            }
+
+            volume += (dz / 3.0) * (current.Area + next.Area + Math.Sqrt(current.Area * next.Area));
+            sideSurface += 0.5 * (current.Perimeter + next.Perimeter) * dz;
+        }
+
+        var capSurface = sliceProfiles[0].Area + sliceProfiles[^1].Area;
+        var objectSurface = sideSurface + capSurface;
+
+        if (volume <= 0 || objectSurface <= 0)
+        {
+            MessageBox.Show("球評価の計算に失敗しました。", "球評価", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
+
+        var sphereSurface = Math.Pow(Math.PI, 1.0 / 3.0) * Math.Pow(6.0 * volume, 2.0 / 3.0);
+        var sphericity = sphereSurface / objectSurface;
+
+        var summary = string.Join(
+            Environment.NewLine,
+            $"ROI: {selectedContour.RtStructKey}",
+            "",
+            $"対象スライス数: {sliceProfiles.Count}",
+            $"体積 (概算): {volume:F3}",
+            $"表面積 (概算): {objectSurface:F3}",
+            $"同体積球の表面積: {sphereSurface:F3}",
+            $"球形度: {sphericity:F3}");
+
+        MessageBox.Show(summary, "球評価", MessageBoxButton.OK, MessageBoxImage.Information);
+    }
+
+    private List<ContourPolyline> GetContoursByRtStructKey(string rtStructKey)
+    {
+        var allContours = _contoursBySopInstanceUid.Values.SelectMany(x => x).Concat(_floatingContours);
+        return allContours.Where(x => string.Equals(x.RtStructKey, rtStructKey, StringComparison.Ordinal)).ToList();
+    }
+
+    private static List<SliceCircleMetrics> BuildPerSliceCircleMetrics(IReadOnlyList<ContourPolyline> contours)
+    {
+        var profiles = BuildPerSliceProfiles(contours);
+        var metrics = new List<SliceCircleMetrics>();
+
+        foreach (var profile in profiles)
+        {
+            var perimeterSquared = profile.Perimeter * profile.Perimeter;
+            if (profile.Area <= 0 || perimeterSquared <= 0 || profile.MajorLength <= 0)
+            {
+                continue;
+            }
+
+            var circularity = (4.0 * Math.PI * profile.Area) / perimeterSquared;
+            var aspectRatio = profile.MinorLength / profile.MajorLength;
+            var roundness = (4.0 * profile.Area) / (Math.PI * profile.MajorLength * profile.MajorLength);
+
+            metrics.Add(new SliceCircleMetrics(profile.Z, circularity, aspectRatio, roundness));
+        }
+
+        return metrics;
+    }
+
+    private static List<SliceProfile> BuildPerSliceProfiles(IReadOnlyList<ContourPolyline> contours)
+    {
+        var contourMetrics = new List<ContourMetric>();
+
+        foreach (var contour in contours)
+        {
+            var metric = TryCalculateContourMetric(contour.PatientPoints);
+            if (metric is not null)
+            {
+                contourMetrics.Add(metric.Value);
+            }
+        }
+
+        return contourMetrics
+            .GroupBy(x => Math.Round(x.Z, 2))
+            .Select(g =>
+            {
+                var totalArea = g.Sum(x => x.Area);
+                var totalPerimeter = g.Sum(x => x.Perimeter);
+                var major = g.Max(x => x.MajorLength);
+                var minor = g.Max(x => x.MinorLength);
+                return new SliceProfile(g.Key, totalArea, totalPerimeter, major, minor);
+            })
+            .OrderBy(x => x.Z)
+            .ToList();
+    }
+
+    private static ContourMetric? TryCalculateContourMetric(IReadOnlyList<PatientPoint> points)
+    {
+        if (points.Count < 3)
+        {
+            return null;
+        }
+
+        var first = points[0];
+        var second = points[1];
+        var third = points[2];
+
+        var ux = second.X - first.X;
+        var uy = second.Y - first.Y;
+        var uz = second.Z - first.Z;
+        var uNorm = Math.Sqrt((ux * ux) + (uy * uy) + (uz * uz));
+        if (uNorm <= 0)
+        {
+            return null;
+        }
+
+        ux /= uNorm;
+        uy /= uNorm;
+        uz /= uNorm;
+
+        var wx = third.X - first.X;
+        var wy = third.Y - first.Y;
+        var wz = third.Z - first.Z;
+
+        var nx = (uy * wz) - (uz * wy);
+        var ny = (uz * wx) - (ux * wz);
+        var nz = (ux * wy) - (uy * wx);
+        var nNorm = Math.Sqrt((nx * nx) + (ny * ny) + (nz * nz));
+        if (nNorm <= 0)
+        {
+            return null;
+        }
+
+        nx /= nNorm;
+        ny /= nNorm;
+        nz /= nNorm;
+
+        var vx = (ny * uz) - (nz * uy);
+        var vy = (nz * ux) - (nx * uz);
+        var vz = (nx * uy) - (ny * ux);
+
+        var projected = new List<(double X, double Y)>(points.Count);
+        foreach (var p in points)
+        {
+            var dx = p.X - first.X;
+            var dy = p.Y - first.Y;
+            var dz = p.Z - first.Z;
+            projected.Add(((dx * ux) + (dy * uy) + (dz * uz), (dx * vx) + (dy * vy) + (dz * vz)));
+        }
+
+        var area = 0.0;
+        var perimeter = 0.0;
+        var minX = double.MaxValue;
+        var maxX = double.MinValue;
+        var minY = double.MaxValue;
+        var maxY = double.MinValue;
+
+        for (var i = 0; i < projected.Count; i++)
+        {
+            var current = projected[i];
+            var next = projected[(i + 1) % projected.Count];
+            area += (current.X * next.Y) - (next.X * current.Y);
+
+            var dx = next.X - current.X;
+            var dy = next.Y - current.Y;
+            perimeter += Math.Sqrt((dx * dx) + (dy * dy));
+
+            if (current.X < minX) minX = current.X;
+            if (current.X > maxX) maxX = current.X;
+            if (current.Y < minY) minY = current.Y;
+            if (current.Y > maxY) maxY = current.Y;
+        }
+
+        area = Math.Abs(area) * 0.5;
+        var width = Math.Max(0.0, maxX - minX);
+        var height = Math.Max(0.0, maxY - minY);
+        var major = Math.Max(width, height);
+        var minor = Math.Min(width, height);
+        var avgZ = points.Average(x => x.Z);
+
+        if (area <= 0 || perimeter <= 0 || major <= 0)
+        {
+            return null;
+        }
+
+        return new ContourMetric(avgZ, area, perimeter, major, Math.Max(1e-9, minor));
+    }
+
+    private static double Average(IReadOnlyList<double> values)
+    {
+        return values.Count == 0 ? 0.0 : values.Average();
+    }
+
+    private static double Median(IReadOnlyList<double> values)
+    {
+        if (values.Count == 0)
+        {
+            return 0.0;
+        }
+
+        var sorted = values.OrderBy(x => x).ToList();
+        var mid = sorted.Count / 2;
+        return sorted.Count % 2 == 0
+            ? (sorted[mid - 1] + sorted[mid]) / 2.0
+            : sorted[mid];
     }
 
     private static bool TryPatientPointToPixel(PatientPoint point, ImageSlice slice, out double pixelX, out double pixelY)
@@ -486,6 +780,12 @@ public partial class StudyViewerWindow : Window
     }
 
     internal readonly record struct PatientPoint(double X, double Y, double Z);
+
+    private readonly record struct ContourMetric(double Z, double Area, double Perimeter, double MajorLength, double MinorLength);
+
+    private readonly record struct SliceProfile(double Z, double Area, double Perimeter, double MajorLength, double MinorLength);
+
+    private readonly record struct SliceCircleMetrics(double Z, double Circularity, double AspectRatio, double Roundness);
 
     internal sealed record ContourPolyline(IReadOnlyList<PatientPoint> PatientPoints, Brush Stroke, string RtStructKey);
 
