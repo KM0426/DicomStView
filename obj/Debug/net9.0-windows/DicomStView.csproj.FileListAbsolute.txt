@@ -36,3 +36,4 @@ C:\Users\kamizugu\source\repos\DicomStView\obj\Debug\net9.0-windows\DicomStV.DFB
 c:\Users\kamizugu\source\repos\DicomStView\obj\Debug\net9.0-windows\StudyViewerWindow.baml
 c:\Users\kamizugu\source\repos\DicomStView\obj\Debug\net9.0-windows\StudyViewerWindow.g.cs
 c:\Users\kamizugu\source\repos\DicomStView\bin\Debug\net9.0-windows\fo-dicom.Imaging.Desktop.dll
+c:\Users\kamizugu\source\repos\DicomStView\obj\Debug\net9.0-windows\DicomStView.sourcelink.json
