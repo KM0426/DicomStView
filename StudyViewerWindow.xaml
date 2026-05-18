@@ -59,7 +59,7 @@
         <Border Grid.Row="2" BorderBrush="#DDDDDD" BorderThickness="1" Background="Black">
             <Grid x:Name="ImageContainer" MouseWheel="ImageContainer_MouseWheel" SizeChanged="ImageContainer_SizeChanged">
                 <Image x:Name="DicomImage" Stretch="Uniform" />
-                <Canvas x:Name="ContourOverlay" IsHitTestVisible="False" />
+                <Canvas x:Name="ContourOverlay" IsHitTestVisible="True" />
             </Grid>
         </Border>
 

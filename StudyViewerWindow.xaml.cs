@@ -271,7 +271,8 @@ public partial class StudyViewerWindow : Window
             var polyline = new Polyline
             {
                 Stroke = contour.Stroke,
-                StrokeThickness = 1.5
+                StrokeThickness = 1.5,
+                Tag = contour // ROI情報をTagに格納
             };
 
             foreach (var point in contour.PatientPoints)
@@ -286,9 +287,47 @@ public partial class StudyViewerWindow : Window
 
             if (polyline.Points.Count >= 2)
             {
+                // 右クリックイベントハンドラを追加
+                polyline.MouseRightButtonDown += Polyline_MouseRightButtonDown;
                 ContourOverlay.Children.Add(polyline);
             }
         }
+
+    }
+
+    // 輪郭Polylineの右クリックでコンテキストメニューを表示
+    private void Polyline_MouseRightButtonDown(object sender, MouseButtonEventArgs e)
+    {
+        if (sender is not Polyline polyline || polyline.Tag is not ContourPolyline contour)
+            return;
+
+        // ContextMenu作成
+        var contextMenu = new ContextMenu();
+
+        // ROI名（無効化されたMenuItemとして最上部に表示）
+        var roiNameItem = new MenuItem
+        {
+            Header = $"ROI: {contour.RtStructKey}",
+            IsEnabled = false
+        };
+        contextMenu.Items.Add(roiNameItem);
+
+        // 区切り線
+        contextMenu.Items.Add(new Separator());
+
+        // 解析メニュー（仮の例: "この輪郭を解析"）
+        var analyzeItem = new MenuItem
+        {
+            Header = "この輪郭を解析"
+        };
+        // 今後ここにクリック時の処理を追加可能
+        contextMenu.Items.Add(analyzeItem);
+
+        // ContextMenuを表示
+        polyline.ContextMenu = contextMenu;
+        contextMenu.IsOpen = true;
+
+        e.Handled = true;
     }
 
     private static bool TryPatientPointToPixel(PatientPoint point, ImageSlice slice, out double pixelX, out double pixelY)
@@ -446,11 +485,11 @@ public partial class StudyViewerWindow : Window
         return Brushes.Lime;
     }
 
-    private readonly record struct PatientPoint(double X, double Y, double Z);
+    internal readonly record struct PatientPoint(double X, double Y, double Z);
 
-    private sealed record ContourPolyline(IReadOnlyList<PatientPoint> PatientPoints, Brush Stroke, string RtStructKey);
+    internal sealed record ContourPolyline(IReadOnlyList<PatientPoint> PatientPoints, Brush Stroke, string RtStructKey);
 
-    private sealed class RtStructDisplayItem
+    internal sealed class RtStructDisplayItem
     {
         public RtStructDisplayItem(string displayText)
         {
@@ -463,7 +502,7 @@ public partial class StudyViewerWindow : Window
         public bool IsSelected { get; set; }
     }
 
-    private sealed class SeriesGroup
+    internal sealed class SeriesGroup
     {
         public SeriesGroup(string seriesInstanceUid, string modality, string? seriesDescription, int? seriesNumber)
         {
@@ -523,7 +562,7 @@ public partial class StudyViewerWindow : Window
         }
     }
 
-    private sealed class ImageSlice
+    internal sealed class ImageSlice
     {
         private readonly string _filePath;
         private BitmapSource? _bitmap;
