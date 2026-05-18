@@ -1,0 +1,71 @@
+<Window x:Class="DicomStView.StudyViewerWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        mc:Ignorable="d"
+        Title="Study Viewer"
+        Height="780"
+        Width="1100"
+        WindowStartupLocation="CenterOwner">
+    <Grid Margin="12">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <TextBlock x:Name="StudyTitleTextBlock"
+                   Grid.Row="0"
+                   FontSize="14"
+                   FontWeight="SemiBold"
+                   TextWrapping="Wrap"
+                   Margin="0,0,0,8" />
+
+        <Grid Grid.Row="1" Margin="0,0,0,8">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="2*" />
+                <ColumnDefinition Width="3*" />
+            </Grid.ColumnDefinitions>
+
+            <StackPanel Grid.Column="0" Margin="0,0,12,0">
+                <TextBlock Text="表示する Series Instance UID"
+                           FontWeight="SemiBold"
+                           Margin="0,0,0,4" />
+                <ComboBox x:Name="SeriesSelectorComboBox"
+                          SelectionChanged="SeriesSelectorComboBox_SelectionChanged"
+                          DisplayMemberPath="DisplayText" />
+            </StackPanel>
+
+            <StackPanel Grid.Column="1">
+                <TextBlock Text="RTSTRUCT 名一覧"
+                           FontWeight="SemiBold"
+                           Margin="0,0,0,4" />
+                <ListBox x:Name="RtStructListBox" Height="110">
+                    <ListBox.ItemTemplate>
+                        <DataTemplate>
+                            <CheckBox Content="{Binding DisplayText}"
+                                      IsChecked="{Binding IsSelected, Mode=TwoWay}"
+                                      Checked="RtStructCheckBox_CheckedChanged"
+                                      Unchecked="RtStructCheckBox_CheckedChanged"
+                                      Margin="0,2,0,2" />
+                        </DataTemplate>
+                    </ListBox.ItemTemplate>
+                </ListBox>
+            </StackPanel>
+        </Grid>
+
+        <Border Grid.Row="2" BorderBrush="#DDDDDD" BorderThickness="1" Background="Black">
+            <Grid x:Name="ImageContainer" MouseWheel="ImageContainer_MouseWheel" SizeChanged="ImageContainer_SizeChanged">
+                <Image x:Name="DicomImage" Stretch="Uniform" />
+                <Canvas x:Name="ContourOverlay" IsHitTestVisible="False" />
+            </Grid>
+        </Border>
+
+        <TextBlock x:Name="SliceInfoTextBlock"
+                   Grid.Row="3"
+                   Margin="0,8,0,0"
+                   Text="マウスホイールでスライスを切り替え" />
+    </Grid>
+</Window>
