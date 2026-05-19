@@ -1,0 +1,1089 @@
+
+> public partial class StudyViewerWindow : Window
+  {
+      private readonly List<SeriesGroup> _seriesGroups = [];
+      private readonly List<RtStructDisplayItem> _rtStructItems = [];
+      private readonly Dictionary<string, RtStructDisplayItem> _rtStructItemsBy
+Key = new(StringComparer.OrdinalIgnoreCase);
+      private readonly List<ImageSlice> _imageSlices = [];
+      private readonly Dictionary<string, List<ContourPolyline>> _contoursBySop
+InstanceUid = new(StringComparer.Ordinal);
+      private readonly List<ContourPolyline> _floatingContours = [];
+      private bool _isUpdatingSeriesSelection;
+      private int _currentSliceIndex;
+  
+      public StudyViewerWindow(string studyInstanceUid, IReadOnlyList<string> s
+tudyFilePaths)
+      {
+          InitializeComponent();
+  
+          StudyTitleTextBlock.Text = $"Study: {studyInstanceUid}";
+  
+          LoadStudy(studyFilePaths);
+          SeriesSelectorComboBox.ItemsSource = _seriesGroups;
+          RtStructListBox.ItemsSource = _rtStructItems;
+  
+          if (_seriesGroups.Count > 0)
+          {
+              SeriesSelectorComboBox.SelectedIndex = 0;
+          }
+          else
+          {
+              MessageBox.Show("陦ｨ遉ｺ蜿ｯ閭ｽ縺ｪ逕ｻ蜒上す繝ｪ繝ｼ繧ｺ縺後≠繧翫∪縺帙ｓ縲・, "Study Viewer"
+, MessageBoxButton.OK, MessageBoxImage.Warning);
+          }
+      }
+  
+      private void LoadStudy(IReadOnlyList<string> studyFilePaths)
+      {
+          var seriesLookup = new Dictionary<string, SeriesGroup>(StringComparer
+.Ordinal);
+  
+          foreach (var filePath in studyFilePaths)
+          {
+              try
+              {
+                  var dicomFile = DicomFile.Open(filePath, FileReadOption.ReadL
+argeOnDemand);
+                  var dataset = dicomFile.Dataset;
+  
+                  var modality = dataset.TryGetSingleValue(DicomTag.Modality, o
+ut string modalityValue)
+                      ? modalityValue.ToUpperInvariant()
+                      : "UNKNOWN";
+  
+                  if (modality == "RTSTRUCT")
+                  {
+                      ExtractRtStructContours(dataset);
+                      continue;
+                  }
+  
+                  if (!dataset.Contains(DicomTag.PixelData))
+                  {
+                      continue;
+                  }
+  
+                  var seriesInstanceUid = dataset.TryGetSingleValue(DicomTag.Se
+riesInstanceUID, out string seriesUid) && !string.IsNullOrWhiteSpace(seriesUid)
+                      ? seriesUid
+                      : filePath;
+  
+                  if (!seriesLookup.TryGetValue(seriesInstanceUid, out var seri
+esGroup))
+                  {
+                      seriesGroup = SeriesGroup.Create(filePath, seriesInstance
+Uid, modality, dataset);
+                      seriesLookup[seriesInstanceUid] = seriesGroup;
+                  }
+  
+                  seriesGroup.FilePaths.Add(filePath);
+              }
+              catch
+              {
+                  // 隱ｭ縺ｿ蜿悶ｊ螟ｱ謨励ヵ繧｡繧､繝ｫ縺ｯ繧ｹ繧ｭ繝・・
+              }
+          }
+  
+          _seriesGroups.Clear();
+          _seriesGroups.AddRange(
+              seriesLookup.Values
+                  .OrderBy(x => x.SortKey, StringComparer.OrdinalIgnoreCase)
+                  .ThenBy(x => x.DisplayText, StringComparer.OrdinalIgnoreCase)
+);
+  
+          _rtStructItems.Sort((left, right) => string.Compare(left.DisplayText,
+ right.DisplayText, StringComparison.OrdinalIgnoreCase));
+      }
+  
+      private void SeriesSelectorComboBox_SelectionChanged(object sender, Selec
+tionChangedEventArgs e)
+      {
+          if (_isUpdatingSeriesSelection)
+          {
+              return;
+          }
+  
+          if (SeriesSelectorComboBox.SelectedItem is not SeriesGroup selectedSe
+ries)
+          {
+              return;
+          }
+  
+          ApplySelectedSeries(selectedSeries);
+      }
+  
+      private void ApplySelectedSeries(SeriesGroup selectedSeries)
+      {
+          _isUpdatingSeriesSelection = true;
+          try
+          {
+              LoadSeriesImages(selectedSeries);
+              RenderCurrentSlice();
+          }
+          finally
+          {
+              _isUpdatingSeriesSelection = false;
+          }
+      }
+  
+      private void LoadSeriesImages(SeriesGroup selectedSeries)
+      {
+          _imageSlices.Clear();
+          _currentSliceIndex = 0;
+  
+          foreach (var filePath in selectedSeries.FilePaths)
+          {
+              try
+              {
+                  var dicomFile = DicomFile.Open(filePath, FileReadOption.ReadL
+argeOnDemand);
+                  var dataset = dicomFile.Dataset;
+  
+                  var modality = dataset.TryGetSingleValue(DicomTag.Modality, o
+ut string modalityValue)
+                      ? modalityValue.ToUpperInvariant()
+                      : "UNKNOWN";
+  
+                  if (!dataset.Contains(DicomTag.PixelData) || modality == "RTS
+TRUCT")
+                  {
+                      continue;
+                  }
+  
+                  _imageSlices.Add(ImageSlice.Create(filePath, modality, datase
+t));
+              }
+              catch
+              {
+                  // 隱ｭ縺ｿ蜿悶ｊ螟ｱ謨励ヵ繧｡繧､繝ｫ縺ｯ繧ｹ繧ｭ繝・・
+              }
+          }
+  
+          _imageSlices.Sort((left, right) => left.SortKey.CompareTo(right.SortK
+ey));
+      }
+  
+      private void RtStructCheckBox_CheckedChanged(object sender, RoutedEventAr
+gs e)
+      {
+          if (_imageSlices.Count == 0)
+          {
+              return;
+          }
+  
+          RenderCurrentSlice();
+      }
+  
+      private bool IsRtStructSelected(string rtStructKey)
+      {
+          if (_rtStructItemsByKey.TryGetValue(rtStructKey, out var item))
+          {
+              return item.IsSelected;
+          }
+  
+          return true;
+      }
+  
+      private RtStructDisplayItem GetOrCreateRtStructItem(string key)
+      {
+          if (_rtStructItemsByKey.TryGetValue(key, out var existing))
+          {
+              return existing;
+          }
+  
+          var created = new RtStructDisplayItem(key);
+          _rtStructItemsByKey[key] = created;
+          _rtStructItems.Add(created);
+          return created;
+      }
+  
+      private void ImageContainer_MouseWheel(object sender, MouseWheelEventArgs
+ e)
+      {
+          if (_imageSlices.Count == 0)
+          {
+              return;
+          }
+  
+          _currentSliceIndex += e.Delta < 0 ? 1 : -1;
+  
+          if (_currentSliceIndex < 0)
+          {
+              _currentSliceIndex = 0;
+          }
+  
+          if (_currentSliceIndex >= _imageSlices.Count)
+          {
+              _currentSliceIndex = _imageSlices.Count - 1;
+          }
+  
+          RenderCurrentSlice();
+          e.Handled = true;
+      }
+  
+      private void ImageContainer_SizeChanged(object sender, SizeChangedEventAr
+gs e)
+      {
+          if (_imageSlices.Count == 0)
+          {
+              return;
+          }
+  
+          var current = _imageSlices[_currentSliceIndex];
+          var bitmap = current.GetBitmapSource();
+          DrawContoursForCurrentSlice(current, bitmap.PixelWidth, bitmap.PixelH
+eight);
+      }
+  
+      private void RenderCurrentSlice()
+      {
+          if (_imageSlices.Count == 0)
+          {
+              DicomImage.Source = null;
+              ContourOverlay.Children.Clear();
+              SliceInfoTextBlock.Text = "陦ｨ遉ｺ蜿ｯ閭ｽ縺ｪ逕ｻ蜒上せ繝ｩ繧､繧ｹ縺後≠繧翫∪縺帙ｓ縲・;
+              return;
+          }
+  
+          var current = _imageSlices[_currentSliceIndex];
+          var bitmap = current.GetBitmapSource();
+          DicomImage.Source = bitmap;
+  
+          SliceInfoTextBlock.Text = $"Slice {_currentSliceIndex + 1}/{_imageSli
+ces.Count}  Modality: {current.Modality}  SOP: {current.SopInstanceUid}";
+  
+          DrawContoursForCurrentSlice(current, bitmap.PixelWidth, bitmap.PixelH
+eight);
+      }
+  
+      private void DrawContoursForCurrentSlice(ImageSlice currentSlice, int sou
+rceWidth, int sourceHeight)
+      {
+          ContourOverlay.Children.Clear();
+  
+          if (ImageContainer.ActualWidth <= 0 || ImageContainer.ActualHeight <=
+ 0)
+          {
+              return;
+          }
+  
+          var scale = Math.Min(ImageContainer.ActualWidth / sourceWidth, ImageC
+ontainer.ActualHeight / sourceHeight);
+          var offsetX = (ImageContainer.ActualWidth - (sourceWidth * scale)) / 
+2.0;
+          var offsetY = (ImageContainer.ActualHeight - (sourceHeight * scale)) 
+/ 2.0;
+  
+          var contours = new List<ContourPolyline>();
+  
+          if (_contoursBySopInstanceUid.TryGetValue(currentSlice.SopInstanceUid
+, out var mappedContours))
+          {
+              contours.AddRange(mappedContours.Where(x => IsRtStructSelected(x.
+RtStructKey)));
+          }
+  
+          contours.AddRange(_floatingContours.Where(x => IsRtStructSelected(x.R
+tStructKey) && IsOnCurrentSlice(x, currentSlice)));
+  
+          foreach (var contour in contours)
+          {
+              var polyline = new Polyline
+              {
+                  Stroke = contour.Stroke,
+                  StrokeThickness = 1.5,
+                  Tag = contour // ROI諠・ｱ繧探ag縺ｫ譬ｼ邏・
+              };
+  
+              foreach (var point in contour.PatientPoints)
+              {
+                  if (!TryPatientPointToPixel(point, currentSlice, out var pixe
+lX, out var pixelY))
+                  {
+                      continue;
+                  }
+  
+                  polyline.Points.Add(new Point(offsetX + (pixelX * scale), off
+setY + (pixelY * scale)));
+              }
+  
+              if (polyline.Points.Count >= 2)
+              {
+                  // 蜿ｳ繧ｯ繝ｪ繝・け繧､繝吶Φ繝医ワ繝ｳ繝峨Λ繧定ｿｽ蜉
+                  polyline.MouseRightButtonDown += Polyline_MouseRightButtonDow
+n;
+                  ContourOverlay.Children.Add(polyline);
+              }
+          }
+  
+      }
+  
+      // 霈ｪ驛ｭPolyline縺ｮ蜿ｳ繧ｯ繝ｪ繝・け縺ｧ繧ｳ繝ｳ繝・く繧ｹ繝医Γ繝九Η繝ｼ繧定｡ｨ遉ｺ
+      private void Polyline_MouseRightButtonDown(object sender, MouseButtonEven
+tArgs e)
+      {
+          if (sender is not Polyline polyline || polyline.Tag is not ContourPol
+yline contour)
+              return;
+  
+          // ContextMenu菴懈・
+          var contextMenu = new ContextMenu();
+  
+          // ROI蜷搾ｼ育┌蜉ｹ蛹悶＆繧後◆MenuItem縺ｨ縺励※譛荳企Κ縺ｫ陦ｨ遉ｺ・・
+          var roiNameItem = new MenuItem
+          {
+              Header = $"ROI: {contour.RtStructKey}",
+              IsEnabled = false
+          };
+          contextMenu.Items.Add(roiNameItem);
+  
+          // 蛹ｺ蛻・ｊ邱・
+          contextMenu.Items.Add(new Separator());
+  
+          // 隗｣譫舌Γ繝九Η繝ｼ・井ｻｮ縺ｮ萓・ "縺薙・霈ｪ驛ｭ繧定ｧ｣譫・・・
+          var analyzeItem = new MenuItem
+          {
+              Header = "縺薙・霈ｪ驛ｭ繧定ｧ｣譫・
+          };
+          // 莉雁ｾ後％縺薙↓繧ｯ繝ｪ繝・け譎ゅ・蜃ｦ逅・ｒ霑ｽ蜉蜿ｯ閭ｽ
+          contextMenu.Items.Add(analyzeItem);
+  
+          var circleEvalItem = new MenuItem
+          {
+              Header = "蜀・ｩ穂ｾ｡"
+          };
+          circleEvalItem.Click += CircleEvalItem_Click;
+          circleEvalItem.Tag = contour;
+          contextMenu.Items.Add(circleEvalItem);
+  
+          var sphereEvalItem = new MenuItem
+          {
+              Header = "逅・ｩ穂ｾ｡"
+          };
+          sphereEvalItem.Click += SphereEvalItem_Click;
+          sphereEvalItem.Tag = contour;
+          contextMenu.Items.Add(sphereEvalItem);
+  
+          // CT蛟､繝偵せ繝医げ繝ｩ繝
+          var ctValueHistogramItem = new MenuItem
+          {
+              Header = "CT蛟､繝偵せ繝医げ繝ｩ繝"
+          };
+          ctValueHistogramItem.Click += CtValueHistogramItem_Click;
+          ctValueHistogramItem.Tag = contour;
+          contextMenu.Items.Add(ctValueHistogramItem);
+  
+          // ContextMenu繧定｡ｨ遉ｺ
+          polyline.ContextMenu = contextMenu;
+          contextMenu.IsOpen = true;
+  
+          e.Handled = true;
+      }
+  
+      private void CircleEvalItem_Click(object sender, RoutedEventArgs e)
+      {
+          if (sender is not MenuItem menuItem || menuItem.Tag is not ContourPol
+yline selectedContour)
+          {
+              return;
+          }
+  
+          var targetContours = GetContoursByRtStructKey(selectedContour.RtStruc
+tKey);
+          if (targetContours.Count == 0)
+          {
+              MessageBox.Show("隧穂ｾ｡蟇ｾ雎｡縺ｮ霈ｪ驛ｭ縺瑚ｦ九▽縺九ｊ縺ｾ縺帙ｓ縲・, "蜀・ｩ穂ｾ｡", Message
+BoxButton.OK, MessageBoxImage.Information);
+              return;
+          }
+  
+          var perSlice = BuildPerSliceCircleMetrics(targetContours);
+          if (perSlice.Count == 0)
+          {
+              MessageBox.Show("隧穂ｾ｡縺ｫ蠢・ｦ√↑霈ｪ驛ｭ繝・・繧ｿ縺御ｸ崎ｶｳ縺励※縺・∪縺吶・, "蜀・ｩ穂ｾ｡", 
+MessageBoxButton.OK, MessageBoxImage.Information);
+              return;
+          }
+  
+          var results = perSlice.Select(x => new
+          {
+              Z = x.Z,
+              Circularity = x.Circularity,
+              AspectRatio = x.AspectRatio,
+              Roundness = x.Roundness
+          }).ToList();
+  
+          ShowAnalysisResults(results);
+      }
+  
+      private void SphereEvalItem_Click(object sender, RoutedEventArgs e)
+      {
+          if (sender is not MenuItem menuItem || menuItem.Tag is not ContourPol
+yline selectedContour)
+          {
+              return;
+          }
+  
+          var targetContours = GetContoursByRtStructKey(selectedContour.RtStruc
+tKey);
+          if (targetContours.Count < 2)
+          {
+              MessageBox.Show("逅・ｩ穂ｾ｡縺ｫ縺ｯ2繧ｹ繝ｩ繧､繧ｹ莉･荳翫・霈ｪ驛ｭ縺悟ｿ・ｦ√〒縺吶・, "逅・ｩ穂ｾ｡
+", MessageBoxButton.OK, MessageBoxImage.Information);
+              return;
+          }
+  
+          var sliceProfiles = BuildPerSliceProfiles(targetContours)
+              .OrderBy(x => x.Z)
+              .ToList();
+  
+          if (sliceProfiles.Count < 2)
+          {
+              MessageBox.Show("逅・ｩ穂ｾ｡縺ｫ蠢・ｦ√↑繧ｹ繝ｩ繧､繧ｹ繝・・繧ｿ縺御ｸ崎ｶｳ縺励※縺・∪縺吶・, "逅・ｩ
+穂ｾ｡", MessageBoxButton.OK, MessageBoxImage.Information);
+              return;
+          }
+  
+          var volume = 0.0;
+          var sideSurface = 0.0;
+  
+          for (var i = 0; i + 1 < sliceProfiles.Count; i++)
+          {
+              var current = sliceProfiles[i];
+              var next = sliceProfiles[i + 1];
+              var dz = Math.Abs(next.Z - current.Z);
+  
+              if (dz <= 0)
+              {
+                  continue;
+              }
+  
+              volume += (dz / 3.0) * (current.Area + next.Area + Math.Sqrt(curr
+ent.Area * next.Area));
+              sideSurface += 0.5 * (current.Perimeter + next.Perimeter) * dz;
+          }
+  
+          var capSurface = sliceProfiles[0].Area + sliceProfiles[^1].Area;
+          var objectSurface = sideSurface + capSurface;
+  
+          if (volume <= 0 || objectSurface <= 0)
+          {
+              MessageBox.Show("逅・ｩ穂ｾ｡縺ｮ險育ｮ励↓螟ｱ謨励＠縺ｾ縺励◆縲・, "逅・ｩ穂ｾ｡", MessageBoxB
+utton.OK, MessageBoxImage.Warning);
+              return;
+          }
+  
+          var sphereSurface = Math.Pow(Math.PI, 1.0 / 3.0) * Math.Pow(6.0 * vol
+ume, 2.0 / 3.0);
+          var sphericity = sphereSurface / objectSurface;
+  
+          var results = new List<object>
+          {
+              new
+              {
+                  ROI = selectedContour.RtStructKey,
+                  Volume = volume,
+                  SurfaceArea = objectSurface,
+                  SphereSurfaceArea = sphereSurface,
+                  Sphericity = sphericity
+              }
+          };
+  
+          ShowAnalysisResults(results);
+      }
+  
+      private List<ContourPolyline> GetContoursByRtStructKey(string rtStructKey
+)
+      {
+          var allContours = _contoursBySopInstanceUid.Values.SelectMany(x => x)
+.Concat(_floatingContours);
+          return allContours.Where(x => string.Equals(x.RtStructKey, rtStructKe
+y, StringComparison.Ordinal)).ToList();
+      }
+  
+      private static List<SliceCircleMetrics> BuildPerSliceCircleMetrics(IReadO
+nlyList<ContourPolyline> contours)
+      {
+          var profiles = BuildPerSliceProfiles(contours);
+          var metrics = new List<SliceCircleMetrics>();
+  
+          foreach (var profile in profiles)
+          {
+              var perimeterSquared = profile.Perimeter * profile.Perimeter;
+              if (profile.Area <= 0 || perimeterSquared <= 0 || profile.MajorLe
+ngth <= 0)
+              {
+                  continue;
+              }
+  
+              var circularity = (4.0 * Math.PI * profile.Area) / perimeterSquar
+ed;
+              var aspectRatio = profile.MinorLength / profile.MajorLength;
+              var roundness = (4.0 * profile.Area) / (Math.PI * profile.MajorLe
+ngth * profile.MajorLength);
+  
+              metrics.Add(new SliceCircleMetrics(profile.Z, circularity, aspect
+Ratio, roundness));
+          }
+  
+          return metrics;
+      }
+  
+      private static List<SliceProfile> BuildPerSliceProfiles(IReadOnlyList<Con
+tourPolyline> contours)
+      {
+          var contourMetrics = new List<ContourMetric>();
+  
+          foreach (var contour in contours)
+          {
+              var metric = TryCalculateContourMetric(contour.PatientPoints);
+              if (metric is not null)
+              {
+                  contourMetrics.Add(metric.Value);
+              }
+          }
+  
+          return contourMetrics
+              .GroupBy(x => Math.Round(x.Z, 2))
+              .Select(g =>
+              {
+                  var totalArea = g.Sum(x => x.Area);
+                  var totalPerimeter = g.Sum(x => x.Perimeter);
+                  var major = g.Max(x => x.MajorLength);
+                  var minor = g.Max(x => x.MinorLength);
+                  return new SliceProfile(g.Key, totalArea, totalPerimeter, maj
+or, minor);
+              })
+              .OrderBy(x => x.Z)
+              .ToList();
+      }
+  
+      private static ContourMetric? TryCalculateContourMetric(IReadOnlyList<Pat
+ientPoint> points)
+      {
+          if (points.Count < 3)
+          {
+              return null;
+          }
+  
+          var first = points[0];
+          var second = points[1];
+          var third = points[2];
+  
+          var ux = second.X - first.X;
+          var uy = second.Y - first.Y;
+          var uz = second.Z - first.Z;
+          var uNorm = Math.Sqrt((ux * ux) + (uy * uy) + (uz * uz));
+          if (uNorm <= 0)
+          {
+              return null;
+          }
+  
+          ux /= uNorm;
+          uy /= uNorm;
+          uz /= uNorm;
+  
+          var wx = third.X - first.X;
+          var wy = third.Y - first.Y;
+          var wz = third.Z - first.Z;
+  
+          var nx = (uy * wz) - (uz * wy);
+          var ny = (uz * wx) - (ux * wz);
+          var nz = (ux * wy) - (uy * wx);
+          var nNorm = Math.Sqrt((nx * nx) + (ny * ny) + (nz * nz));
+          if (nNorm <= 0)
+          {
+              return null;
+          }
+  
+          nx /= nNorm;
+          ny /= nNorm;
+          nz /= nNorm;
+  
+          var vx = (ny * uz) - (nz * uy);
+          var vy = (nz * ux) - (nx * uz);
+          var vz = (nx * uy) - (ny * ux);
+  
+          var projected = new List<(double X, double Y)>(points.Count);
+          foreach (var p in points)
+          {
+              var dx = p.X - first.X;
+              var dy = p.Y - first.Y;
+              var dz = p.Z - first.Z;
+              projected.Add(((dx * ux) + (dy * uy) + (dz * uz), (dx * vx) + (dy
+ * vy) + (dz * vz)));
+          }
+  
+          var area = 0.0;
+          var perimeter = 0.0;
+          var minX = double.MaxValue;
+          var maxX = double.MinValue;
+          var minY = double.MaxValue;
+          var maxY = double.MinValue;
+  
+          for (var i = 0; i < projected.Count; i++)
+          {
+              var current = projected[i];
+              var next = projected[(i + 1) % projected.Count];
+              area += (current.X * next.Y) - (next.X * current.Y);
+  
+              var dx = next.X - current.X;
+              var dy = next.Y - current.Y;
+              perimeter += Math.Sqrt((dx * dx) + (dy * dy));
+  
+              if (current.X < minX) minX = current.X;
+              if (current.X > maxX) maxX = current.X;
+              if (current.Y < minY) minY = current.Y;
+              if (current.Y > maxY) maxY = current.Y;
+          }
+  
+          area = Math.Abs(area) * 0.5;
+          var width = Math.Max(0.0, maxX - minX);
+          var height = Math.Max(0.0, maxY - minY);
+          var major = Math.Max(width, height);
+          var minor = Math.Min(width, height);
+          var avgZ = points.Average(x => x.Z);
+  
+          if (area <= 0 || perimeter <= 0 || major <= 0)
+          {
+              return null;
+          }
+  
+          return new ContourMetric(avgZ, area, perimeter, major, Math.Max(1e-9,
+ minor));
+      }
+  
+      private static double Average(IReadOnlyList<double> values)
+      {
+          return values.Count == 0 ? 0.0 : values.Average();
+      }
+  
+      private static double Median(IReadOnlyList<double> values)
+      {
+          if (values.Count == 0)
+          {
+              return 0.0;
+          }
+  
+          var sorted = values.OrderBy(x => x).ToList();
+          var mid = sorted.Count / 2;
+          return sorted.Count % 2 == 0
+              ? (sorted[mid - 1] + sorted[mid]) / 2.0
+              : sorted[mid];
+      }
+  
+      private static bool TryPatientPointToPixel(PatientPoint point, ImageSlice
+ slice, out double pixelX, out double pixelY)
+      {
+          var dx = point.X - slice.ImagePositionPatient[0];
+          var dy = point.Y - slice.ImagePositionPatient[1];
+          var dz = point.Z - slice.ImagePositionPatient[2];
+  
+          var rowDirection = slice.RowDirection;
+          var columnDirection = slice.ColumnDirection;
+  
+          pixelX = ((dx * rowDirection[0]) + (dy * rowDirection[1]) + (dz * row
+Direction[2])) / slice.ColumnSpacing;
+          pixelY = ((dx * columnDirection[0]) + (dy * columnDirection[1]) + (dz
+ * columnDirection[2])) / slice.RowSpacing;
+  
+          return true;
+      }
+  
+      private static bool IsOnCurrentSlice(ContourPolyline contour, ImageSlice 
+slice)
+      {
+          var tolerance = Math.Max(1.0, slice.SliceThickness);
+  
+          foreach (var point in contour.PatientPoints)
+          {
+              var dx = point.X - slice.ImagePositionPatient[0];
+              var dy = point.Y - slice.ImagePositionPatient[1];
+              var dz = point.Z - slice.ImagePositionPatient[2];
+              var distanceToPlane = Math.Abs((dx * slice.SliceNormal[0]) + (dy 
+* slice.SliceNormal[1]) + (dz * slice.SliceNormal[2]));
+  
+              if (distanceToPlane <= tolerance)
+              {
+                  return true;
+              }
+          }
+  
+          return false;
+      }
+  
+      private void ExtractRtStructContours(DicomDataset rtStructDataset)
+      {
+          var structureSetLabel = rtStructDataset.TryGetSingleValue(DicomTag.St
+ructureSetLabel, out string label) && !string.IsNullOrWhiteSpace(label)
+              ? label
+              : "RTSTRUCT";
+  
+          var roiNameByNumber = new Dictionary<int, string>();
+          if (rtStructDataset.TryGetSequence(DicomTag.StructureSetROISequence, 
+out var structureSetRoiSequence))
+          {
+              foreach (var roiItem in structureSetRoiSequence.Items)
+              {
+                  if (!roiItem.TryGetSingleValue(DicomTag.ROINumber, out int ro
+iNumber))
+                  {
+                      continue;
+                  }
+  
+                  var roiName = roiItem.TryGetSingleValue(DicomTag.ROIName, out
+ string name) && !string.IsNullOrWhiteSpace(name)
+                      ? name
+                      : $"ROI {roiNumber}";
+  
+                  roiNameByNumber[roiNumber] = roiName;
+              }
+          }
+  
+          if (!rtStructDataset.TryGetSequence(DicomTag.ROIContourSequence, out 
+var roiContourSequence))
+          {
+              _ = GetOrCreateRtStructItem(structureSetLabel);
+              return;
+          }
+  
+          foreach (var roiContour in roiContourSequence.Items)
+          {
+              var stroke = GetStrokeBrush(roiContour);
+              var referencedRoiNumber = roiContour.TryGetSingleValue(DicomTag.R
+eferencedROINumber, out int roiNumber)
+                  ? roiNumber
+                  : -1;
+  
+              var roiName = referencedRoiNumber >= 0 && roiNameByNumber.TryGetV
+alue(referencedRoiNumber, out var mappedName)
+                  ? mappedName
+                  : (referencedRoiNumber >= 0 ? $"ROI {referencedRoiNumber}" : 
+"ROI");
+  
+              var rtStructKey = $"{structureSetLabel} / {roiName}";
+              _ = GetOrCreateRtStructItem(rtStructKey);
+  
+              if (!roiContour.TryGetSequence(DicomTag.ContourSequence, out var 
+contourSequence))
+              {
+                  continue;
+              }
+  
+              foreach (var contourItem in contourSequence.Items)
+              {
+                  if (!contourItem.TryGetValues(DicomTag.ContourData, out doubl
+e[] contourData) || contourData.Length < 6)
+                  {
+                      continue;
+                  }
+  
+                  var points = new List<PatientPoint>(contourData.Length / 3);
+                  for (var i = 0; i + 2 < contourData.Length; i += 3)
+                  {
+                      points.Add(new PatientPoint(contourData[i], contourData[i
+ + 1], contourData[i + 2]));
+                  }
+  
+                  if (points.Count < 2)
+                  {
+                      continue;
+                  }
+  
+                  if (points[0] != points[^1])
+                  {
+                      points.Add(points[0]);
+                  }
+  
+                  var contour = new ContourPolyline(points, stroke, rtStructKey
+);
+                  var referencedSopUid = TryGetReferencedSopInstanceUid(contour
+Item);
+  
+                  if (string.IsNullOrWhiteSpace(referencedSopUid))
+                  {
+                      _floatingContours.Add(contour);
+                      continue;
+                  }
+  
+                  if (!_contoursBySopInstanceUid.TryGetValue(referencedSopUid, 
+out var contours))
+                  {
+                      contours = [];
+                      _contoursBySopInstanceUid[referencedSopUid] = contours;
+                  }
+  
+                  contours.Add(contour);
+              }
+          }
+      }
+  
+      private static string? TryGetReferencedSopInstanceUid(DicomDataset contou
+rItem)
+      {
+          if (!contourItem.TryGetSequence(DicomTag.ContourImageSequence, out va
+r contourImageSequence))
+          {
+              return null;
+          }
+  
+          foreach (var imageItem in contourImageSequence.Items)
+          {
+              if (imageItem.TryGetSingleValue(DicomTag.ReferencedSOPInstanceUID
+, out string sopUid) && !string.IsNullOrWhiteSpace(sopUid))
+              {
+                  return sopUid;
+              }
+          }
+  
+          return null;
+      }
+  
+      private static Brush GetStrokeBrush(DicomDataset roiContour)
+      {
+          if (roiContour.TryGetValues(DicomTag.ROIDisplayColor, out int[] rgb) 
+&& rgb.Length >= 3)
+          {
+              return new SolidColorBrush(Color.FromRgb((byte)rgb[0], (byte)rgb[
+1], (byte)rgb[2]));
+          }
+  
+          return Brushes.Lime;
+      }
+  
+      internal readonly record struct PatientPoint(double X, double Y, double Z
+);
+  
+      private readonly record struct ContourMetric(double Z, double Area, doubl
+e Perimeter, double MajorLength, double MinorLength);
+  
+      private readonly record struct SliceProfile(double Z, double Area, double
+ Perimeter, double MajorLength, double MinorLength);
+  
+      private readonly record struct SliceCircleMetrics(double Z, double Circul
+arity, double AspectRatio, double Roundness);
+  
+      internal sealed record ContourPolyline(IReadOnlyList<PatientPoint> Patien
+tPoints, Brush Stroke, string RtStructKey);
+  
+      internal sealed class RtStructDisplayItem
+      {
+          public RtStructDisplayItem(string displayText)
+          {
+              DisplayText = displayText;
+              IsSelected = true;
+          }
+  
+          public string DisplayText { get; }
+  
+          public bool IsSelected { get; set; }
+      }
+  
+      internal sealed class SeriesGroup
+      {
+          public SeriesGroup(string seriesInstanceUid, string modality, string?
+ seriesDescription, int? seriesNumber)
+          {
+              SeriesInstanceUid = seriesInstanceUid;
+              Modality = modality;
+              SeriesDescription = seriesDescription;
+              SeriesNumber = seriesNumber;
+          }
+  
+          public string SeriesInstanceUid { get; }
+  
+          public string Modality { get; }
+  
+          public string? SeriesDescription { get; }
+  
+          public int? SeriesNumber { get; }
+  
+          public List<string> FilePaths { get; } = [];
+  
+          public string SortKey => SeriesNumber.HasValue
+              ? $"{SeriesNumber.Value:D6}_{SeriesInstanceUid}"
+              : SeriesInstanceUid;
+  
+          public string DisplayText
+          {
+              get
+              {
+                  var parts = new List<string> { SeriesInstanceUid };
+                  if (SeriesNumber.HasValue)
+                  {
+                      parts.Add($"No:{SeriesNumber.Value}");
+                  }
+  
+                  parts.Add(Modality);
+  
+                  if (!string.IsNullOrWhiteSpace(SeriesDescription))
+                  {
+                      parts.Add(SeriesDescription);
+                  }
+  
+                  parts.Add($"{FilePaths.Count} images");
+                  return string.Join(" | ", parts);
+              }
+          }
+  
+          public static SeriesGroup Create(string filePath, string seriesInstan
+ceUid, string modality, DicomDataset dataset)
+          {
+              var seriesDescription = dataset.TryGetSingleValue(DicomTag.Series
+Description, out string description) && !string.IsNullOrWhiteSpace(description)
+                  ? description
+                  : System.IO.Path.GetFileNameWithoutExtension(filePath);
+  
+              var seriesNumber = dataset.TryGetSingleValue(DicomTag.SeriesNumbe
+r, out int number)
+                  ? (int?)number
+                  : null;
+  
+              return new SeriesGroup(seriesInstanceUid, modality, seriesDescrip
+tion, seriesNumber);
+          }
+      }
+  
+      internal sealed class ImageSlice
+      {
+          private readonly string _filePath;
+          private BitmapSource? _bitmap;
+  
+          private ImageSlice(
+              string filePath,
+              string modality,
+              string sopInstanceUid,
+              double[] imagePositionPatient,
+              double[] rowDirection,
+              double[] columnDirection,
+              double[] sliceNormal,
+              double rowSpacing,
+              double columnSpacing,
+              double sliceThickness,
+              double sortKey)
+          {
+              _filePath = filePath;
+              Modality = modality;
+              SopInstanceUid = sopInstanceUid;
+              ImagePositionPatient = imagePositionPatient;
+              RowDirection = rowDirection;
+              ColumnDirection = columnDirection;
+              SliceNormal = sliceNormal;
+              RowSpacing = rowSpacing;
+              ColumnSpacing = columnSpacing;
+              SliceThickness = sliceThickness;
+              SortKey = sortKey;
+          }
+  
+          public string Modality { get; }
+  
+          public string SopInstanceUid { get; }
+  
+          public double[] ImagePositionPatient { get; }
+  
+          public double[] RowDirection { get; }
+  
+          public double[] ColumnDirection { get; }
+  
+          public double[] SliceNormal { get; }
+  
+          public double RowSpacing { get; }
+  
+          public double ColumnSpacing { get; }
+  
+          public double SliceThickness { get; }
+  
+          public double SortKey { get; }
+  
+          public static ImageSlice Create(string filePath, string modality, Dic
+omDataset dataset)
+          {
+              var sopInstanceUid = dataset.TryGetSingleValue(DicomTag.SOPInstan
+ceUID, out string sopUid)
+                  ? sopUid
+                  : System.IO.Path.GetFileName(filePath);
+  
+              var imagePositionPatient = dataset.TryGetValues(DicomTag.ImagePos
+itionPatient, out double[] ipp) && ipp.Length >= 3
+                  ? new double[] { ipp[0], ipp[1], ipp[2] }
+                  : new double[] { 0.0, 0.0, 0.0 };
+  
+              var imageOrientationPatient = dataset.TryGetValues(DicomTag.Image
+OrientationPatient, out double[] iop) && iop.Length >= 6
+                  ? iop
+                  : new double[] { 1.0, 0.0, 0.0, 0.0, 1.0, 0.0 };
+  
+              var rowDirection = new[] { imageOrientationPatient[0], imageOrien
+tationPatient[1], imageOrientationPatient[2] };
+              var columnDirection = new[] { imageOrientationPatient[3], imageOr
+ientationPatient[4], imageOrientationPatient[5] };
+              var sliceNormal = new[]
+              {
+                  (rowDirection[1] * columnDirection[2]) - (rowDirection[2] * c
+olumnDirection[1]),
+                  (rowDirection[2] * columnDirection[0]) - (rowDirection[0] * c
+olumnDirection[2]),
+                  (rowDirection[0] * columnDirection[1]) - (rowDirection[1] * c
+olumnDirection[0])
+              };
+  
+              var pixelSpacing = dataset.TryGetValues(DicomTag.PixelSpacing, ou
+t double[] spacing) && spacing.Length >= 2
+                  ? spacing
+                  : new double[] { 1.0, 1.0 };
+  
+              var rowSpacing = pixelSpacing[0];
+              var columnSpacing = pixelSpacing[1];
+  
+              var sliceThickness = dataset.TryGetSingleValue(DicomTag.SliceThic
+kness, out double thickness)
+                  ? Math.Abs(thickness)
+                  : 1.0;
+  
+              var positionKey = (imagePositionPatient[0] * sliceNormal[0])
+                  + (imagePositionPatient[1] * sliceNormal[1])
+                  + (imagePositionPatient[2] * sliceNormal[2]);
+  
+              if (dataset.TryGetSingleValue(DicomTag.InstanceNumber, out int in
+stanceNumber))
+              {
+                  positionKey = (positionKey * 1000.0) + instanceNumber;
+              }
+  
+              return new ImageSlice(
+                  filePath,
+                  modality,
+                  sopInstanceUid,
+                  imagePositionPatient,
+                  rowDirection,
+                  columnDirection,
+                  sliceNormal,
+                  rowSpacing,
+                  columnSpacing,
+                  sliceThickness,
+                  positionKey);
+          }
+  
+          public BitmapSource GetBitmapSource()
+          {
+              if (_bitmap is not null)
+              {
+                  return _bitmap;
+              }
+  
+              var dicomImage = new DicomImage(_filePath);
+              using var rendered = dicomImage.RenderImage().As<DrawingBitmap>()
+;
+              using var memoryStream = new MemoryStream();
+  
+              rendered.Save(memoryStream, DrawingImageFormat.Bmp);
+              memoryStream.Position = 0;
+  
+              _bitmap = BitmapFrame.Create(memoryStream, BitmapCreateOptions.No
+ne, BitmapCacheOption.OnLoad);
+              return _bitmap;
+          }
+      }
+  }
+
+

@@ -16,7 +16,10 @@
     <UseWPF>true</UseWPF>
   </PropertyGroup>
   <ItemGroup>
+    <PackageReference Include="DotNetProjects.WpfToolkit.DataVisualization" Version="6.1.94" />
     <PackageReference Include="fo-dicom" Version="5.2.6" />
+    <PackageReference Include="fo-dicom.Imaging.Desktop" Version="5.2.6" />
+    <PackageReference Include="System.Drawing.Common" Version="9.0.0" />
   </ItemGroup>
   <ItemGroup>
     <ReferencePath Include="C:\Program Files\dotnet\packs\Microsoft.WindowsDesktop.App.Ref\9.0.16\ref\net9.0\Accessibility.dll" />
@@ -232,10 +235,6 @@
     <ReferencePath Include="C:\Program Files\dotnet\packs\Microsoft.WindowsDesktop.App.Ref\9.0.16\ref\net9.0\UIAutomationProvider.dll" />
     <ReferencePath Include="C:\Program Files\dotnet\packs\Microsoft.WindowsDesktop.App.Ref\9.0.16\ref\net9.0\UIAutomationTypes.dll" />
     <ReferencePath Include="C:\Program Files\dotnet\packs\Microsoft.WindowsDesktop.App.Ref\9.0.16\ref\net9.0\WindowsBase.dll" />
-  </ItemGroup>
-  <ItemGroup>
-    <Compile Include="c:\Users\kamizugu\source\repos\DicomStView\obj\Debug\net9.0-windows\MainWindow.g.cs" />
-    <Compile Include="c:\Users\kamizugu\source\repos\DicomStView\obj\Debug\net9.0-windows\App.g.cs" />
   </ItemGroup>
   <ItemGroup>
     <Analyzer Include="C:\Program Files\dotnet\sdk\9.0.314\Sdks\Microsoft.NET.Sdk\targets\..\analyzers\Microsoft.CodeAnalysis.CSharp.NetAnalyzers.dll" />
