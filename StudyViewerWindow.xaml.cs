@@ -333,13 +333,13 @@ namespace DicomStView
             sphereEvalItem.Tag = contour;
             contextMenu.Items.Add(sphereEvalItem);
 
-            var ctHistogramItem = new MenuItem
-            {
-                Header = "CT Value Histogram"
-            };
-            ctHistogramItem.Click += CtValueHistogramItem_Click;
-            ctHistogramItem.Tag = contour;
-            contextMenu.Items.Add(ctHistogramItem);
+            // var ctHistogramItem = new MenuItem
+            // {
+            //     Header = "CT Value Histogram"
+            // };
+            // ctHistogramItem.Click += CtValueHistogramItem_Click;
+            // ctHistogramItem.Tag = contour;
+            // contextMenu.Items.Add(ctHistogramItem);
 
             polyline.ContextMenu = contextMenu;
             contextMenu.IsOpen = true;
@@ -375,6 +375,12 @@ namespace DicomStView
                 AspectRatio = x.AspectRatio,
                 Roundness = x.Roundness
             }).ToList();
+
+            if (TryBuildCtHistogramForRoi(selectedContour.RtStructKey, isThreeDimensional: false, out var histogram, out var statistics))
+            {
+                ShowAnalysisResults(results, histogram, statistics);
+                return;
+            }
 
             ShowAnalysisResults(results);
         }
@@ -445,18 +451,23 @@ namespace DicomStView
                 }
             };
 
+            if (TryBuildCtHistogramForRoi(selectedContour.RtStructKey, isThreeDimensional: true, out var histogram, out var statistics))
+            {
+                ShowAnalysisResults(results, histogram, statistics);
+                return;
+            }
+
             ShowAnalysisResults(results);
         }
 
         private void CtValueHistogramItem_Click(object sender, RoutedEventArgs e)
         {
-            if (_imageSlices.Count == 0)
+            if (sender is not MenuItem menuItem || menuItem.Tag is not ContourPolyline selectedContour)
             {
-                MessageBox.Show("No image slice is loaded.", "CT Histogram", MessageBoxButton.OK, MessageBoxImage.Information);
                 return;
             }
 
-            if (!TryBuildCtHistogramForCurrentSlice(out var histogram, out var statistics))
+            if (!TryBuildCtHistogramForRoi(selectedContour.RtStructKey, isThreeDimensional: false, out var histogram, out var statistics))
             {
                 MessageBox.Show("Failed to compute CT histogram for the current slice.", "CT Histogram", MessageBoxButton.OK, MessageBoxImage.Warning);
                 return;
@@ -468,7 +479,7 @@ namespace DicomStView
                 {
                     Slice = _currentSliceIndex + 1,
                     Bins = histogram.Count,
-                    VoxelCount = histogram.Values.Sum()
+                    VoxelCount = histogram.Sum(x => x.Y)
                 }
             });
 
@@ -477,19 +488,172 @@ namespace DicomStView
             window.Show();
         }
 
-        private bool TryBuildCtHistogramForCurrentSlice(out Dictionary<int, int> histogram, out string statistics)
+        private bool TryBuildCtHistogramForRoi(
+            string rtStructKey,
+            bool isThreeDimensional,
+            out List<AnalysisResultsWindow.HistogramPoint> histogram,
+            out string statistics)
         {
-            histogram = new Dictionary<int, int>();
+            histogram = [];
             statistics = string.Empty;
 
-            var current = _imageSlices[_currentSliceIndex];
+            if (_imageSlices.Count == 0)
+            {
+                return false;
+            }
+
+            var targetSlices = isThreeDimensional
+                ? _imageSlices
+                : new List<ImageSlice> { _imageSlices[_currentSliceIndex] };
+
+            var contourCandidates = GetContoursByRtStructKey(rtStructKey);
+            if (contourCandidates.Count == 0)
+            {
+                return false;
+            }
+
+            var huValuesInsideContours = new List<double>();
+
+            foreach (var slice in targetSlices)
+            {
+                var contoursOnSlice = contourCandidates
+                    .Where(c => IsOnCurrentSlice(c, slice))
+                    .ToList();
+
+                if (contoursOnSlice.Count == 0)
+                {
+                    continue;
+                }
+
+                if (!TryReadCtValues(slice.FilePath, out var width, out var height, out var huValues))
+                {
+                    continue;
+                }
+
+                var mask = new bool[width * height];
+                FillContourMask(mask, width, height, slice, contoursOnSlice);
+
+                for (var i = 0; i < mask.Length; i++)
+                {
+                    if (mask[i])
+                    {
+                        huValuesInsideContours.Add(huValues[i]);
+                    }
+                }
+            }
+
+            if (huValuesInsideContours.Count == 0)
+            {
+                return false;
+            }
+
+            const int binWidth = 25;
+            var histogramMap = new Dictionary<int, int>();
+            foreach (var value in huValuesInsideContours)
+            {
+                var binCenter = (int)(Math.Round(value / binWidth) * binWidth);
+                histogramMap.TryGetValue(binCenter, out var count);
+                histogramMap[binCenter] = count + 1;
+            }
+
+            histogram = histogramMap
+                .OrderBy(x => x.Key)
+                .Select(x => new AnalysisResultsWindow.HistogramPoint(x.Key, x.Value))
+                .ToList();
+
+            statistics = string.Join(
+                Environment.NewLine,
+                isThreeDimensional ? "Mode: 3D (all slices in selected ROI)" : "Mode: 2D (current slice in selected ROI)",
+                $"Min HU: {huValuesInsideContours.Min():F1}",
+                $"Max HU: {huValuesInsideContours.Max():F1}",
+                $"Mean HU: {Average(huValuesInsideContours):F1}",
+                $"Median HU: {Median(huValuesInsideContours):F1}",
+                $"Samples: {huValuesInsideContours.Count}");
+
+            return true;
+        }
+
+        private static void FillContourMask(bool[] mask, int width, int height, ImageSlice slice, IReadOnlyList<ContourPolyline> contours)
+        {
+            foreach (var contour in contours)
+            {
+                var polygon = new List<Point>(contour.PatientPoints.Count);
+                foreach (var patientPoint in contour.PatientPoints)
+                {
+                    if (TryPatientPointToPixel(patientPoint, slice, out var x, out var y))
+                    {
+                        polygon.Add(new Point(x, y));
+                    }
+                }
+
+                if (polygon.Count < 3)
+                {
+                    continue;
+                }
+
+                var minX = Math.Max(0, (int)Math.Floor(polygon.Min(p => p.X)));
+                var maxX = Math.Min(width - 1, (int)Math.Ceiling(polygon.Max(p => p.X)));
+                var minY = Math.Max(0, (int)Math.Floor(polygon.Min(p => p.Y)));
+                var maxY = Math.Min(height - 1, (int)Math.Ceiling(polygon.Max(p => p.Y)));
+
+                for (var y = minY; y <= maxY; y++)
+                {
+                    for (var x = minX; x <= maxX; x++)
+                    {
+                        if (!IsPointInPolygon(x + 0.5, y + 0.5, polygon))
+                        {
+                            continue;
+                        }
+
+                        mask[(y * width) + x] = true;
+                    }
+                }
+            }
+        }
+
+        private static bool IsPointInPolygon(double x, double y, IReadOnlyList<Point> polygon)
+        {
+            var inside = false;
+
+            for (int i = 0, j = polygon.Count - 1; i < polygon.Count; j = i++)
+            {
+                var xi = polygon[i].X;
+                var yi = polygon[i].Y;
+                var xj = polygon[j].X;
+                var yj = polygon[j].Y;
+
+                var intersects = ((yi > y) != (yj > y))
+                    && (x < ((xj - xi) * (y - yi) / ((yj - yi) + double.Epsilon)) + xi);
+
+                if (intersects)
+                {
+                    inside = !inside;
+                }
+            }
+
+            return inside;
+        }
+
+        private static bool TryReadCtValues(string filePath, out int width, out int height, out double[] huValues)
+        {
+            width = 0;
+            height = 0;
+            huValues = [];
 
             try
             {
-                var dicomFile = DicomFile.Open(current.FilePath, FileReadOption.ReadLargeOnDemand);
+                var dicomFile = DicomFile.Open(filePath, FileReadOption.ReadLargeOnDemand);
                 var dataset = dicomFile.Dataset;
 
                 if (!dataset.Contains(DicomTag.PixelData))
+                {
+                    return false;
+                }
+
+                if (!dataset.TryGetSingleValue(DicomTag.Columns, out int columns)
+                    || !dataset.TryGetSingleValue(DicomTag.Rows, out int rows)
+                    || columns <= 0
+                    || rows <= 0)
                 {
                     return false;
                 }
@@ -500,53 +664,71 @@ namespace DicomStView
                     return false;
                 }
 
+                width = columns;
+                height = rows;
+
                 var slope = dataset.TryGetSingleValue(DicomTag.RescaleSlope, out double slopeValue) ? slopeValue : 1.0;
                 var intercept = dataset.TryGetSingleValue(DicomTag.RescaleIntercept, out double interceptValue) ? interceptValue : 0.0;
+                var bitsAllocated = pixelData.BitsAllocated;
+                var bitsStored = pixelData.BitsStored;
+                var isSigned = pixelData.PixelRepresentation == PixelRepresentation.Signed;
 
                 var frameBytes = pixelData.GetFrame(0).Data;
-                var values = new List<double>(frameBytes.Length / Math.Max(1, pixelData.BytesAllocated));
+                var expectedSamples = width * height;
+                huValues = new double[expectedSamples];
 
-                if (pixelData.BitsAllocated <= 8)
+                if (bitsAllocated <= 8)
                 {
-                    for (var i = 0; i < frameBytes.Length; i++)
+                    if (frameBytes.Length < expectedSamples)
                     {
-                        var raw = pixelData.PixelRepresentation == PixelRepresentation.Signed
-                            ? (double)unchecked((sbyte)frameBytes[i])
-                            : frameBytes[i];
-                        values.Add((raw * slope) + intercept);
+                        return false;
                     }
-                }
-                else
-                {
-                    for (var i = 0; i + 1 < frameBytes.Length; i += 2)
+
+                    for (var i = 0; i < expectedSamples; i++)
                     {
-                        var raw = pixelData.PixelRepresentation == PixelRepresentation.Signed
-                            ? (double)BitConverter.ToInt16(frameBytes, i)
-                            : BitConverter.ToUInt16(frameBytes, i);
-                        values.Add((raw * slope) + intercept);
+                        var raw = isSigned ? (int)unchecked((sbyte)frameBytes[i]) : frameBytes[i];
+                        huValues[i] = (raw * slope) + intercept;
                     }
+
+                    return true;
                 }
 
-                if (values.Count == 0)
+                var bytesPerSample = bitsAllocated / 8;
+                if (bytesPerSample <= 0)
                 {
                     return false;
                 }
 
-                const int binWidth = 25;
-                foreach (var value in values)
+                var maxReadableSamples = frameBytes.Length / bytesPerSample;
+                if (maxReadableSamples < expectedSamples)
                 {
-                    var binCenter = (int)(Math.Round(value / binWidth) * binWidth);
-                    histogram.TryGetValue(binCenter, out var count);
-                    histogram[binCenter] = count + 1;
+                    return false;
                 }
 
-                statistics = string.Join(
-                    Environment.NewLine,
-                    $"Min HU: {values.Min():F1}",
-                    $"Max HU: {values.Max():F1}",
-                    $"Mean HU: {Average(values):F1}",
-                    $"Median HU: {Median(values):F1}",
-                    $"Samples: {values.Count}");
+                var valueMask = bitsStored >= 16 ? 0xFFFF : ((1 << bitsStored) - 1);
+                var signBit = bitsStored > 0 ? (1 << (bitsStored - 1)) : 0;
+                var signExtendMask = bitsStored >= 31 ? 0 : (1 << bitsStored);
+
+                for (var i = 0; i < expectedSamples; i++)
+                {
+                    var offset = i * bytesPerSample;
+                    var rawWord = BitConverter.ToUInt16(frameBytes, offset);
+                    var storedValue = rawWord & valueMask;
+
+                    int rawValue;
+                    if (isSigned)
+                    {
+                        rawValue = (storedValue & signBit) != 0
+                            ? storedValue - signExtendMask
+                            : storedValue;
+                    }
+                    else
+                    {
+                        rawValue = storedValue;
+                    }
+
+                    huValues[i] = (rawValue * slope) + intercept;
+                }
 
                 return true;
             }
@@ -558,6 +740,14 @@ namespace DicomStView
 
         private void ShowAnalysisResults(object results)
         {
+            ShowAnalysisResults(results, null, null);
+        }
+
+        private void ShowAnalysisResults(
+            object results,
+            IEnumerable<AnalysisResultsWindow.HistogramPoint>? histogram,
+            string? statistics)
+        {
             var rows = results switch
             {
                 IEnumerable<object> many => many,
@@ -568,6 +758,11 @@ namespace DicomStView
             {
                 Owner = this
             };
+
+            if (histogram is not null)
+            {
+                window.DisplayHistogram(histogram, statistics ?? string.Empty);
+            }
 
             window.Show();
         }

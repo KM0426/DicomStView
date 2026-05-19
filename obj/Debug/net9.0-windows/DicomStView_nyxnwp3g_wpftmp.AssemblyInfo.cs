@@ -13,7 +13,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("DicomStView")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+b88e1d7c993906f2a6effdd1ed82bda8ccc72ffc")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+f87dfe4019fedc1372249527e172c94d30a5d12d")]
 [assembly: System.Reflection.AssemblyProductAttribute("DicomStView")]
 [assembly: System.Reflection.AssemblyTitleAttribute("DicomStView")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]

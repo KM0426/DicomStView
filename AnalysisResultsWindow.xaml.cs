@@ -1,5 +1,4 @@
 using System.Collections.Generic;
-using System.Linq;
 using System.Windows;
 using System.Windows.Controls.DataVisualization.Charting;
 
@@ -13,10 +12,12 @@ namespace DicomStView
             ResultsDataGrid.ItemsSource = analysisResults;
         }
 
-        public void DisplayHistogram(Dictionary<int, int> histogramData, string statistics)
+        public void DisplayHistogram(IEnumerable<HistogramPoint> histogramData, string statistics)
         {
-            HistogramChart.DataContext = histogramData;
+            HistogramSeries.ItemsSource = histogramData;
             StatisticsTextBlock.Text = statistics;
         }
+
+        public sealed record HistogramPoint(int X, int Y);
     }
 }
