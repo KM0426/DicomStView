@@ -368,21 +368,46 @@ namespace DicomStView
                 return;
             }
 
-            var results = perSlice.Select(x => new
+            if (TryBuildCtHistogramsBySliceForRoi(selectedContour.RtStructKey, out var histogramsBySlice))
             {
-                Z = x.Z,
-                Circularity = x.Circularity,
-                AspectRatio = x.AspectRatio,
-                Roundness = x.Roundness
-            }).ToList();
+                var results = perSlice
+                    .Select(x =>
+                    {
+                        var sliceKey = CreateSliceKey(x.Z);
+                        return histogramsBySlice.TryGetValue(sliceKey, out var payload)
+                            ? new CircleAnalysisResultRow(
+                                x.Z,
+                                payload.Statistics.Samples,
+                                x.AreaMm2,
+                                payload.Statistics.MinHU,
+                                payload.Statistics.MaxHU,
+                                payload.Statistics.MeanHU,
+                                payload.Statistics.MedianHU,
+                                payload.Statistics.SD,
+                                payload.Statistics.CVPercent,
+                                payload.Statistics.RMS,
+                                x.Circularity,
+                                x.AspectRatio,
+                                x.Roundness)
+                            : new CircleAnalysisResultRow(x.Z, 0, x.AreaMm2, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, x.Circularity, x.AspectRatio, x.Roundness);
+                    })
+                    .ToList();
 
-            if (TryBuildCtHistogramForRoi(selectedContour.RtStructKey, isThreeDimensional: false, out var histogram, out var statistics))
-            {
-                ShowAnalysisResults(results, histogram, statistics);
+                var initialSelectedKey = CreateSliceKey(selectedContour.PatientPoints.Average(x => x.Z));
+
+                ShowAnalysisResultsWithSelectableHistograms(
+                    results.Cast<object>(),
+                    histogramsBySlice,
+                    row => row is CircleAnalysisResultRow item ? CreateSliceKey(item.Z) : null,
+                    initialSelectedKey);
                 return;
             }
 
-            ShowAnalysisResults(results);
+            var fallbackResults = perSlice
+                .Select(x => new CircleAnalysisResultRow(x.Z, 0, x.AreaMm2, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, x.Circularity, x.AspectRatio, x.Roundness))
+                .ToList();
+
+            ShowAnalysisResults(fallbackResults);
         }
 
         private void SphereEvalItem_Click(object sender, RoutedEventArgs e)
@@ -439,25 +464,49 @@ namespace DicomStView
             var sphereSurface = Math.Pow(Math.PI, 1.0 / 3.0) * Math.Pow(6.0 * volume, 2.0 / 3.0);
             var sphericity = sphereSurface / objectSurface;
 
-            var results = new List<object>
+            if (TryBuildCtHistogramForRoi(selectedContour.RtStructKey, isThreeDimensional: true, out var histogram, out var statistics, out var histogramStatistics))
             {
-                new
+                var results = new List<object>
                 {
-                    ROI = selectedContour.RtStructKey,
-                    Volume = volume,
-                    SurfaceArea = objectSurface,
-                    SphereSurfaceArea = sphereSurface,
-                    Sphericity = sphericity
-                }
-            };
+                    new SphereAnalysisResultRow(
+                        selectedContour.RtStructKey,
+                        histogramStatistics.Samples,
+                        volume,
+                        histogramStatistics.MinHU,
+                        histogramStatistics.MaxHU,
+                        histogramStatistics.MeanHU,
+                        histogramStatistics.MedianHU,
+                        histogramStatistics.SD,
+                        histogramStatistics.CVPercent,
+                        histogramStatistics.RMS,
+                        objectSurface,
+                        sphereSurface,
+                        sphericity)
+                };
 
-            if (TryBuildCtHistogramForRoi(selectedContour.RtStructKey, isThreeDimensional: true, out var histogram, out var statistics))
-            {
                 ShowAnalysisResults(results, histogram, statistics);
                 return;
             }
 
-            ShowAnalysisResults(results);
+            var fallbackResults = new List<object>
+            {
+                new SphereAnalysisResultRow(
+                    selectedContour.RtStructKey,
+                    0,
+                    volume,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    objectSurface,
+                    sphereSurface,
+                    sphericity)
+            };
+
+            ShowAnalysisResults(fallbackResults);
         }
 
         private void CtValueHistogramItem_Click(object sender, RoutedEventArgs e)
@@ -467,7 +516,7 @@ namespace DicomStView
                 return;
             }
 
-            if (!TryBuildCtHistogramForRoi(selectedContour.RtStructKey, isThreeDimensional: false, out var histogram, out var statistics))
+            if (!TryBuildCtHistogramForRoi(selectedContour.RtStructKey, isThreeDimensional: false, out var histogram, out var statistics, out _))
             {
                 MessageBox.Show("Failed to compute CT histogram for the current slice.", "CT Histogram", MessageBoxButton.OK, MessageBoxImage.Warning);
                 return;
@@ -492,10 +541,12 @@ namespace DicomStView
             string rtStructKey,
             bool isThreeDimensional,
             out List<AnalysisResultsWindow.HistogramPoint> histogram,
-            out string statistics)
+            out string statistics,
+            out AnalysisResultsWindow.HistogramStatistics histogramStatistics)
         {
             histogram = [];
             statistics = string.Empty;
+            histogramStatistics = new AnalysisResultsWindow.HistogramStatistics(0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
 
             if (_imageSlices.Count == 0)
             {
@@ -547,30 +598,145 @@ namespace DicomStView
                 return false;
             }
 
-            const int binWidth = 25;
+            var payload = BuildHistogramPayload(
+                huValuesInsideContours,
+                isThreeDimensional ? "Mode: 3D (all slices in selected ROI)" : "Mode: 2D (current slice in selected ROI)");
+
+            histogram = payload.Histogram.ToList();
+            statistics = payload.Description;
+            histogramStatistics = payload.Statistics;
+
+            return true;
+        }
+
+        private bool TryBuildCtHistogramsBySliceForRoi(
+            string rtStructKey,
+            out Dictionary<string, AnalysisResultsWindow.HistogramPayload> histogramsBySlice)
+        {
+            histogramsBySlice = new Dictionary<string, AnalysisResultsWindow.HistogramPayload>(StringComparer.Ordinal);
+            var valuesBySliceKey = new Dictionary<string, List<double>>(StringComparer.Ordinal);
+
+            if (_imageSlices.Count == 0)
+            {
+                return false;
+            }
+
+            var contourCandidates = GetContoursByRtStructKey(rtStructKey);
+            if (contourCandidates.Count == 0)
+            {
+                return false;
+            }
+
+            foreach (var slice in _imageSlices)
+            {
+                var contoursOnSlice = contourCandidates
+                    .Where(c => IsOnCurrentSlice(c, slice))
+                    .ToList();
+
+                if (contoursOnSlice.Count == 0)
+                {
+                    continue;
+                }
+
+                if (!TryReadCtValues(slice.FilePath, out var width, out var height, out var huValues))
+                {
+                    continue;
+                }
+
+                var mask = new bool[width * height];
+                FillContourMask(mask, width, height, slice, contoursOnSlice);
+
+                var valuesInsideContour = new List<double>();
+                for (var i = 0; i < mask.Length; i++)
+                {
+                    if (mask[i])
+                    {
+                        valuesInsideContour.Add(huValues[i]);
+                    }
+                }
+
+                if (valuesInsideContour.Count == 0)
+                {
+                    continue;
+                }
+
+                var sliceMetrics = contoursOnSlice
+                    .Select(x => TryCalculateContourMetric(x.PatientPoints))
+                    .Where(x => x is not null)
+                    .Select(x => x!.Value)
+                    .ToList();
+
+                if (sliceMetrics.Count == 0)
+                {
+                    continue;
+                }
+
+                var sliceZ = Math.Round(sliceMetrics.Average(x => x.Z), 2);
+                var sliceKey = CreateSliceKey(sliceZ);
+
+                if (!valuesBySliceKey.TryGetValue(sliceKey, out var accumulatedValues))
+                {
+                    accumulatedValues = [];
+                    valuesBySliceKey[sliceKey] = accumulatedValues;
+                }
+
+                accumulatedValues.AddRange(valuesInsideContour);
+            }
+
+            foreach (var entry in valuesBySliceKey.OrderBy(x => x.Key, StringComparer.Ordinal))
+            {
+                if (!double.TryParse(entry.Key, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var sliceZ))
+                {
+                    continue;
+                }
+
+                histogramsBySlice[entry.Key] = BuildHistogramPayload(
+                    entry.Value,
+                    $"Mode: 2D (selected row slice in selected ROI){Environment.NewLine}Slice Z: {sliceZ:F2}");
+            }
+
+            return histogramsBySlice.Count > 0;
+        }
+
+        private static AnalysisResultsWindow.HistogramPayload BuildHistogramPayload(
+            IReadOnlyList<double> values,
+            string header)
+        {
+            const int binWidth = 20;
+            var mean = Average(values);
+            var median = Median(values);
+            var sd = StandardDeviation(values, mean);
+            var cv = Math.Abs(mean) > 1e-9 ? (sd / Math.Abs(mean)) * 100.0 : 0.0;
+            var rms = RootMeanSquare(values);
+            var stats = new AnalysisResultsWindow.HistogramStatistics(
+                values.Count,
+                values.Min(),
+                values.Max(),
+                mean,
+                median,
+                sd,
+                cv,
+                rms);
+
             var histogramMap = new Dictionary<int, int>();
-            foreach (var value in huValuesInsideContours)
+            foreach (var value in values)
             {
                 var binCenter = (int)(Math.Round(value / binWidth) * binWidth);
                 histogramMap.TryGetValue(binCenter, out var count);
                 histogramMap[binCenter] = count + 1;
             }
 
-            histogram = histogramMap
+            var histogram = histogramMap
                 .OrderBy(x => x.Key)
                 .Select(x => new AnalysisResultsWindow.HistogramPoint(x.Key, x.Value))
                 .ToList();
 
-            statistics = string.Join(
-                Environment.NewLine,
-                isThreeDimensional ? "Mode: 3D (all slices in selected ROI)" : "Mode: 2D (current slice in selected ROI)",
-                $"Min HU: {huValuesInsideContours.Min():F1}",
-                $"Max HU: {huValuesInsideContours.Max():F1}",
-                $"Mean HU: {Average(huValuesInsideContours):F1}",
-                $"Median HU: {Median(huValuesInsideContours):F1}",
-                $"Samples: {huValuesInsideContours.Count}");
+            return new AnalysisResultsWindow.HistogramPayload(histogram, stats, header);
+        }
 
-            return true;
+        private static string CreateSliceKey(double z)
+        {
+            return Math.Round(z, 2).ToString("F2", System.Globalization.CultureInfo.InvariantCulture);
         }
 
         private static void FillContourMask(bool[] mask, int width, int height, ImageSlice slice, IReadOnlyList<ContourPolyline> contours)
@@ -767,6 +933,21 @@ namespace DicomStView
             window.Show();
         }
 
+        private void ShowAnalysisResultsWithSelectableHistograms(
+            IEnumerable<object> results,
+            IReadOnlyDictionary<string, AnalysisResultsWindow.HistogramPayload> histogramsBySlice,
+            Func<object, string?> histogramKeySelector,
+            string? initialSelectedKey)
+        {
+            var window = new AnalysisResultsWindow(results)
+            {
+                Owner = this
+            };
+
+            window.ConfigureSelectableHistograms(histogramsBySlice, histogramKeySelector, initialSelectedKey);
+            window.Show();
+        }
+
         private List<ContourPolyline> GetContoursByRtStructKey(string rtStructKey)
         {
             var allContours = _contoursBySopInstanceUid.Values.SelectMany(x => x).Concat(_floatingContours);
@@ -790,7 +971,7 @@ namespace DicomStView
                 var aspectRatio = profile.MinorLength / profile.MajorLength;
                 var roundness = (4.0 * profile.Area) / (Math.PI * profile.MajorLength * profile.MajorLength);
 
-                metrics.Add(new SliceCircleMetrics(profile.Z, circularity, aspectRatio, roundness));
+                metrics.Add(new SliceCircleMetrics(profile.Z, profile.Area, circularity, aspectRatio, roundness));
             }
 
             return metrics;
@@ -932,6 +1113,32 @@ namespace DicomStView
             return sorted.Count % 2 == 0
                 ? (sorted[mid - 1] + sorted[mid]) / 2.0
                 : sorted[mid];
+        }
+
+        private static double StandardDeviation(IReadOnlyList<double> values, double mean)
+        {
+            if (values.Count == 0)
+            {
+                return 0.0;
+            }
+
+            var variance = values.Average(value =>
+            {
+                var diff = value - mean;
+                return diff * diff;
+            });
+
+            return Math.Sqrt(variance);
+        }
+
+        private static double RootMeanSquare(IReadOnlyList<double> values)
+        {
+            if (values.Count == 0)
+            {
+                return 0.0;
+            }
+
+            return Math.Sqrt(values.Average(value => value * value));
         }
 
         private static bool TryPatientPointToPixel(PatientPoint point, ImageSlice slice, out double pixelX, out double pixelY)
@@ -1095,7 +1302,37 @@ namespace DicomStView
 
         private readonly record struct SliceProfile(double Z, double Area, double Perimeter, double MajorLength, double MinorLength);
 
-        private readonly record struct SliceCircleMetrics(double Z, double Circularity, double AspectRatio, double Roundness);
+        private readonly record struct SliceCircleMetrics(double Z, double AreaMm2, double Circularity, double AspectRatio, double Roundness);
+
+        private readonly record struct CircleAnalysisResultRow(
+            double Z,
+            int Samples,
+            double AreaMm2,
+            double MinHU,
+            double MaxHU,
+            double MeanHU,
+            double MedianHU,
+            double SD,
+            double CVPercent,
+            double RMS,
+            double Circularity,
+            double AspectRatio,
+            double Roundness);
+
+        private readonly record struct SphereAnalysisResultRow(
+            string ROI,
+            int Samples,
+            double Volume,
+            double MinHU,
+            double MaxHU,
+            double MeanHU,
+            double MedianHU,
+            double SD,
+            double CVPercent,
+            double RMS,
+            double SurfaceArea,
+            double SphereSurfaceArea,
+            double Sphericity);
 
         internal sealed record ContourPolyline(IReadOnlyList<PatientPoint> PatientPoints, Brush Stroke, string RtStructKey);
 

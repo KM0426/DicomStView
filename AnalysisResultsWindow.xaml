@@ -12,14 +12,22 @@
             <RowDefinition Height="Auto" />
         </Grid.RowDefinitions>
 
-        <DataGrid x:Name="ResultsDataGrid" AutoGenerateColumns="True" HorizontalAlignment="Stretch" VerticalAlignment="Stretch" Grid.Row="0" />
+        <DataGrid x:Name="ResultsDataGrid"
+              AutoGenerateColumns="True"
+              IsReadOnly="True"
+              CanUserAddRows="False"
+              CanUserDeleteRows="False"
+              SelectionMode="Single"
+              SelectionUnit="FullRow"
+              HorizontalAlignment="Stretch"
+              VerticalAlignment="Stretch"
+              Grid.Row="0" />
 
         <StackPanel Orientation="Vertical" Grid.Row="1" Margin="10">
             <TextBlock Text="CT値ヒストグラム" FontWeight="Bold" Margin="0,0,0,5" />
             <Charting:Chart x:Name="HistogramChart" Title="CT Value Distribution" Height="200">
                 <Charting:ColumnSeries x:Name="HistogramSeries" DependentValuePath="Y" IndependentValuePath="X" />
             </Charting:Chart>
-            <TextBlock x:Name="StatisticsTextBlock" Text="統計情報" Margin="0,10,0,0" />
         </StackPanel>
     </Grid>
 </Window>

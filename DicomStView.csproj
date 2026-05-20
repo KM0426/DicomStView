@@ -15,4 +15,11 @@
     <PackageReference Include="System.Drawing.Common" Version="9.0.0" />
   </ItemGroup>
 
+  <ItemGroup Condition="'$(DesignTimeBuild)' == 'true' and Exists('obj\Debug\net9.0-windows\MainWindow.g.cs')">
+    <Compile Include="obj\Debug\net9.0-windows\MainWindow.g.cs" Visible="false" AutoGen="true" DesignTime="true" />
+    <Compile Include="obj\Debug\net9.0-windows\StudyViewerWindow.g.cs" Visible="false" AutoGen="true" DesignTime="true" />
+    <Compile Include="obj\Debug\net9.0-windows\AnalysisResultsWindow.g.cs" Visible="false" AutoGen="true" DesignTime="true" />
+    <Compile Include="obj\Debug\net9.0-windows\App.g.cs" Visible="false" AutoGen="true" DesignTime="true" />
+  </ItemGroup>
+
 </Project>
