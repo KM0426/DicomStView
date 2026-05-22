@@ -22,6 +22,7 @@ namespace DicomStView
         private readonly List<ContourPolyline> _floatingContours = new();
         private bool _isUpdatingSeriesSelection;
         private int _currentSliceIndex;
+        private string _sliceInfoBaseText = "マウスホイールでスライスを切り替え";
 
         public StudyViewerWindow(string studyInstanceUid, IReadOnlyList<string> studyFilePaths)
         {
@@ -225,13 +226,48 @@ namespace DicomStView
             DrawContoursForCurrentSlice(current, bitmap.PixelWidth, bitmap.PixelHeight);
         }
 
+        private void ImageContainer_MouseMove(object sender, MouseEventArgs e)
+        {
+            if (_imageSlices.Count == 0)
+            {
+                return;
+            }
+
+            var current = _imageSlices[_currentSliceIndex];
+            var mousePosition = e.GetPosition(ImageContainer);
+
+            if (!TryGetImagePixelFromViewPoint(mousePosition, current, out var pixelX, out var pixelY))
+            {
+                UpdateSliceInfoText();
+                return;
+            }
+
+            if (!current.TryGetPixelDisplayValue(pixelX, pixelY, out var pixelValue, out var unitLabel))
+            {
+                UpdateSliceInfoText($"X:{pixelX}, Y:{pixelY}, Value:N/A");
+                return;
+            }
+
+            var valueText = unitLabel.Length > 0
+                ? $"{pixelValue:F1} {unitLabel}"
+                : $"{pixelValue:F1}";
+
+            UpdateSliceInfoText($"X:{pixelX}, Y:{pixelY}, Value:{valueText}");
+        }
+
+        private void ImageContainer_MouseLeave(object sender, MouseEventArgs e)
+        {
+            UpdateSliceInfoText();
+        }
+
         private void RenderCurrentSlice()
         {
             if (_imageSlices.Count == 0)
             {
                 DicomImage.Source = null;
                 ContourOverlay.Children.Clear();
-                SliceInfoTextBlock.Text = "No image slices are available.";
+                _sliceInfoBaseText = "No image slices are available.";
+                UpdateSliceInfoText();
                 return;
             }
 
@@ -239,7 +275,8 @@ namespace DicomStView
             var bitmap = current.GetBitmapSource();
             DicomImage.Source = bitmap;
 
-            SliceInfoTextBlock.Text = $"Slice {_currentSliceIndex + 1}/{_imageSlices.Count}  Modality: {current.Modality}  SOP: {current.SopInstanceUid}";
+            _sliceInfoBaseText = $"Slice {_currentSliceIndex + 1}/{_imageSlices.Count}  Modality: {current.Modality}  SOP: {current.SopInstanceUid}";
+            UpdateSliceInfoText();
 
             DrawContoursForCurrentSlice(current, bitmap.PixelWidth, bitmap.PixelHeight);
         }
@@ -266,6 +303,24 @@ namespace DicomStView
 
             contours.AddRange(_floatingContours.Where(x => IsRtStructSelected(x.RtStructKey) && IsOnCurrentSlice(x, currentSlice)));
 
+            // Fallback for multi-series CT studies: if geometry matches current slice plane,
+            // draw contours even when SOP references point to another CT series.
+            var alreadyAdded = new HashSet<ContourPolyline>(contours);
+            var crossSeriesCandidates = _contoursBySopInstanceUid.Values
+                .SelectMany(x => x)
+                .Where(x => !alreadyAdded.Contains(x) && IsRtStructSelected(x.RtStructKey));
+
+            foreach (var contour in GetNearestContoursPerRoiOnCurrentSlice(crossSeriesCandidates, currentSlice))
+            {
+                if (alreadyAdded.Contains(contour))
+                {
+                    continue;
+                }
+
+                contours.Add(contour);
+                _ = alreadyAdded.Add(contour);
+            }
+
             foreach (var contour in contours)
             {
                 var polyline = new Polyline
@@ -291,6 +346,107 @@ namespace DicomStView
                     ContourOverlay.Children.Add(polyline);
                 }
             }
+        }
+
+        private static IEnumerable<ContourPolyline> GetNearestContoursPerRoiOnCurrentSlice(
+            IEnumerable<ContourPolyline> candidates,
+            ImageSlice currentSlice)
+        {
+            var currentPlanePosition = GetPlanePosition(currentSlice.ImagePositionPatient, currentSlice.SliceNormal);
+            var tolerance = GetPlaneMatchTolerance(currentSlice);
+            var contoursByRoi = new Dictionary<string, List<(ContourPolyline Contour, double Distance)>>(StringComparer.Ordinal);
+
+            foreach (var contour in candidates)
+            {
+                if (contour.PatientPoints.Count == 0)
+                {
+                    continue;
+                }
+
+                var contourPlanePosition = contour.PatientPoints.Average(point =>
+                    GetPlanePosition(new[] { point.X, point.Y, point.Z }, currentSlice.SliceNormal));
+
+                var distance = Math.Abs(contourPlanePosition - currentPlanePosition);
+                if (distance > tolerance)
+                {
+                    continue;
+                }
+
+                if (!contoursByRoi.TryGetValue(contour.RtStructKey, out var list))
+                {
+                    list = [];
+                    contoursByRoi[contour.RtStructKey] = list;
+                }
+
+                list.Add((contour, distance));
+            }
+
+            const double sameSliceEpsilonMm = 0.05;
+
+            foreach (var entry in contoursByRoi.Values)
+            {
+                if (entry.Count == 0)
+                {
+                    continue;
+                }
+
+                var nearestDistance = entry.Min(x => x.Distance);
+                foreach (var item in entry)
+                {
+                    if (item.Distance - nearestDistance <= sameSliceEpsilonMm)
+                    {
+                        yield return item.Contour;
+                    }
+                }
+            }
+        }
+
+        private static double GetPlanePosition(double[] point, double[] planeNormal)
+        {
+            return (point[0] * planeNormal[0]) + (point[1] * planeNormal[1]) + (point[2] * planeNormal[2]);
+        }
+
+        private static double GetPlaneMatchTolerance(ImageSlice slice)
+        {
+            return Math.Max(0.2, Math.Min(1.0, slice.SliceThickness * 0.5));
+        }
+
+        private bool TryGetImagePixelFromViewPoint(Point viewPoint, ImageSlice slice, out int pixelX, out int pixelY)
+        {
+            pixelX = 0;
+            pixelY = 0;
+
+            var bitmap = slice.GetBitmapSource();
+            var sourceWidth = bitmap.PixelWidth;
+            var sourceHeight = bitmap.PixelHeight;
+
+            if (sourceWidth <= 0 || sourceHeight <= 0 || ImageContainer.ActualWidth <= 0 || ImageContainer.ActualHeight <= 0)
+            {
+                return false;
+            }
+
+            var scale = Math.Min(ImageContainer.ActualWidth / sourceWidth, ImageContainer.ActualHeight / sourceHeight);
+            var offsetX = (ImageContainer.ActualWidth - (sourceWidth * scale)) / 2.0;
+            var offsetY = (ImageContainer.ActualHeight - (sourceHeight * scale)) / 2.0;
+
+            var imageX = (viewPoint.X - offsetX) / scale;
+            var imageY = (viewPoint.Y - offsetY) / scale;
+
+            if (imageX < 0 || imageY < 0 || imageX >= sourceWidth || imageY >= sourceHeight)
+            {
+                return false;
+            }
+
+            pixelX = (int)Math.Floor(imageX);
+            pixelY = (int)Math.Floor(imageY);
+            return true;
+        }
+
+        private void UpdateSliceInfoText(string? cursorInfo = null)
+        {
+            SliceInfoTextBlock.Text = string.IsNullOrWhiteSpace(cursorInfo)
+                ? _sliceInfoBaseText
+                : $"{_sliceInfoBaseText}    {cursorInfo}";
         }
 
         private void Polyline_MouseRightButtonDown(object sender, MouseButtonEventArgs e)
@@ -702,7 +858,7 @@ namespace DicomStView
             IReadOnlyList<double> values,
             string header)
         {
-            const int binWidth = 20;
+            const int binWidth = 10;
             var mean = Average(values);
             var median = Median(values);
             var sd = StandardDeviation(values, mean);
@@ -1413,6 +1569,9 @@ namespace DicomStView
         {
             private readonly string _filePath;
             private BitmapSource? _bitmap;
+            private double[]? _displayPixelValues;
+            private int _pixelWidth;
+            private int _pixelHeight;
 
             private ImageSlice(
                 string filePath,
@@ -1535,6 +1694,134 @@ namespace DicomStView
 
                 _bitmap = BitmapFrame.Create(memoryStream, BitmapCreateOptions.None, BitmapCacheOption.OnLoad);
                 return _bitmap;
+            }
+
+            public bool TryGetPixelDisplayValue(int x, int y, out double value, out string unitLabel)
+            {
+                value = 0.0;
+                unitLabel = string.Empty;
+
+                if (!EnsurePixelValuesLoaded())
+                {
+                    return false;
+                }
+
+                if (x < 0 || y < 0 || x >= _pixelWidth || y >= _pixelHeight)
+                {
+                    return false;
+                }
+
+                var index = (y * _pixelWidth) + x;
+                if (_displayPixelValues is null || index < 0 || index >= _displayPixelValues.Length)
+                {
+                    return false;
+                }
+
+                value = _displayPixelValues[index];
+                unitLabel = string.Equals(Modality, "CT", StringComparison.OrdinalIgnoreCase) ? "HU" : string.Empty;
+                return true;
+            }
+
+            private bool EnsurePixelValuesLoaded()
+            {
+                if (_displayPixelValues is not null)
+                {
+                    return true;
+                }
+
+                try
+                {
+                    var dicomFile = DicomFile.Open(_filePath, FileReadOption.ReadLargeOnDemand);
+                    var dataset = dicomFile.Dataset;
+
+                    if (!dataset.Contains(DicomTag.PixelData)
+                        || !dataset.TryGetSingleValue(DicomTag.Columns, out int columns)
+                        || !dataset.TryGetSingleValue(DicomTag.Rows, out int rows)
+                        || columns <= 0
+                        || rows <= 0)
+                    {
+                        return false;
+                    }
+
+                    var pixelData = DicomPixelData.Create(dataset);
+                    if (pixelData.NumberOfFrames == 0)
+                    {
+                        return false;
+                    }
+
+                    var bitsAllocated = pixelData.BitsAllocated;
+                    var bitsStored = pixelData.BitsStored;
+                    var isSigned = pixelData.PixelRepresentation == PixelRepresentation.Signed;
+                    var applyCtRescale = string.Equals(Modality, "CT", StringComparison.OrdinalIgnoreCase);
+                    var slope = dataset.TryGetSingleValue(DicomTag.RescaleSlope, out double slopeValue) ? slopeValue : 1.0;
+                    var intercept = dataset.TryGetSingleValue(DicomTag.RescaleIntercept, out double interceptValue) ? interceptValue : 0.0;
+
+                    var frameBytes = pixelData.GetFrame(0).Data;
+                    var expectedSamples = columns * rows;
+                    var values = new double[expectedSamples];
+
+                    if (bitsAllocated <= 8)
+                    {
+                        if (frameBytes.Length < expectedSamples)
+                        {
+                            return false;
+                        }
+
+                        for (var i = 0; i < expectedSamples; i++)
+                        {
+                            var raw = isSigned ? (int)unchecked((sbyte)frameBytes[i]) : frameBytes[i];
+                            values[i] = applyCtRescale ? (raw * slope) + intercept : raw;
+                        }
+                    }
+                    else
+                    {
+                        var bytesPerSample = bitsAllocated / 8;
+                        if (bytesPerSample <= 0)
+                        {
+                            return false;
+                        }
+
+                        var maxReadableSamples = frameBytes.Length / bytesPerSample;
+                        if (maxReadableSamples < expectedSamples)
+                        {
+                            return false;
+                        }
+
+                        var valueMask = bitsStored >= 16 ? 0xFFFF : ((1 << bitsStored) - 1);
+                        var signBit = bitsStored > 0 ? (1 << (bitsStored - 1)) : 0;
+                        var signExtendMask = bitsStored >= 31 ? 0 : (1 << bitsStored);
+
+                        for (var i = 0; i < expectedSamples; i++)
+                        {
+                            var offset = i * bytesPerSample;
+                            var rawWord = BitConverter.ToUInt16(frameBytes, offset);
+                            var storedValue = rawWord & valueMask;
+
+                            int rawValue;
+                            if (isSigned)
+                            {
+                                rawValue = (storedValue & signBit) != 0
+                                    ? storedValue - signExtendMask
+                                    : storedValue;
+                            }
+                            else
+                            {
+                                rawValue = storedValue;
+                            }
+
+                            values[i] = applyCtRescale ? (rawValue * slope) + intercept : rawValue;
+                        }
+                    }
+
+                    _pixelWidth = columns;
+                    _pixelHeight = rows;
+                    _displayPixelValues = values;
+                    return true;
+                }
+                catch
+                {
+                    return false;
+                }
             }
         }
     }

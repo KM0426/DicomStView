@@ -57,7 +57,11 @@
         </Grid>
 
         <Border Grid.Row="2" BorderBrush="#DDDDDD" BorderThickness="1" Background="Black">
-            <Grid x:Name="ImageContainer" MouseWheel="ImageContainer_MouseWheel" SizeChanged="ImageContainer_SizeChanged">
+            <Grid x:Name="ImageContainer"
+                  MouseWheel="ImageContainer_MouseWheel"
+                  SizeChanged="ImageContainer_SizeChanged"
+                  MouseMove="ImageContainer_MouseMove"
+                  MouseLeave="ImageContainer_MouseLeave">
                 <Image x:Name="DicomImage" Stretch="Uniform" />
                 <Canvas x:Name="ContourOverlay" IsHitTestVisible="True" />
             </Grid>
